@@ -58,7 +58,7 @@ public sealed class UsersController(AeroComplianceDbContext db, ICurrentUserCont
         var email = request.Email.Trim().ToLowerInvariant();
         if (await db.Users.AnyAsync(x => x.Id != id && x.Email == email, ct)) return ConflictProblem("A user with this email already exists.");
         var role = await db.Roles.SingleOrDefaultAsync(x => x.Name == request.Role.Trim(), ct);
-        if (role is null) return Problem(statusCode: 400, title: "Invalid role");
+        if (role is null || !Roles.All.Contains(role.Name)) return Problem(statusCode: 400, title: "Invalid role");
         if (!TryResolveAssignment(role.Name, request.MunicipalityId, out var municipalityId, out var error)) return Problem(statusCode: 403, title: "Forbidden assignment", detail: error);
         if (municipalityId.HasValue && !await db.Municipalities.AnyAsync(x => x.Id == municipalityId, ct)) return Problem(statusCode: 400, title: "Invalid municipality");
         var before = new { entity.FullName, entity.Email, Role = entity.Role.Name, entity.MunicipalityId, entity.IsActive };

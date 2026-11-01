@@ -77,6 +77,7 @@ services:
       DemoMode__Enabled: "true"
       HealthChecks__Expose: "true"
       HttpsRedirection__Enabled: "false"
+      ReverseProxy__KnownProxies__0: ${AEROCOMPLIANCE_FRONTEND_BACKEND_IP:-172.30.250.254}
     depends_on:
       postgres: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
@@ -162,12 +163,18 @@ services:
       timeout: 5s
       retries: 30
       start_period: 10s
-    networks: [frontend, backend]
+    networks:
+      frontend: {}
+      backend:
+        ipv4_address: ${AEROCOMPLIANCE_FRONTEND_BACKEND_IP:-172.30.250.254}
 
 networks:
   frontend: {}
   backend:
     internal: true
+    ipam:
+      config:
+        - subnet: ${AEROCOMPLIANCE_BACKEND_SUBNET:-172.30.250.0/24}
 
 volumes:
   postgres-data: {}

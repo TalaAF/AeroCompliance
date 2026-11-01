@@ -16,6 +16,12 @@ Open http://localhost:8080. The first startup generates and persists settings un
 `/var/lib/aerocompliance`; `docker logs aerocompliance` prints the generated demo login. Stop and
 restart without losing data using `docker stop aerocompliance` and `docker start aerocompliance`.
 
+The bundled nginx proxies to the API over `127.0.0.1`, which the API trusts as its local proxy.
+Nginx replaces inbound `X-Forwarded-For` with the connecting peer's address, so a client cannot
+spoof its audit IP or IP-based login limit through this endpoint. If a separate public reverse
+proxy is added in front, the recorded address is that proxy unless a separate trusted ingress
+policy is configured.
+
 On a **new empty volume**, wait for Docker to report `healthy`. First startup then contains
 four fictional aerial images, three completed sample flights, a planned follow-up flight,
 mock building and road detections, two candidates awaiting review, and a labelled sample

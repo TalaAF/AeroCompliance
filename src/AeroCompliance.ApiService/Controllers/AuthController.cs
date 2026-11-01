@@ -4,7 +4,9 @@ using AeroCompliance.Domain.Entities;
 using AeroCompliance.Infrastructure.Persistence;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 
 namespace AeroCompliance.ApiService.Controllers;
 
@@ -22,28 +24,37 @@ public class AuthController(
 {
     /// <summary>Exchange email + password for an access + refresh token pair.</summary>
     [HttpPost("login")]
+    [EnableRateLimiting("login")]
     [ProducesResponseType(typeof(TokenResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     public async Task<IActionResult> Login([FromBody] LoginRequest request, CancellationToken ct)
     {
         // Load the user with its role (needed for the role claim).
+        var email = request.Email.Trim().ToLowerInvariant();
         var user = await db.Users
             .Include(u => u.Role)
-            .SingleOrDefaultAsync(u => u.Email == request.Email, ct);
+            .SingleOrDefaultAsync(u => u.Email == email, ct);
 
         // Same 401 whether the email is unknown, the password is wrong, or the account is inactive —
-        // never disclose which. Verify a hash even when the user is missing to reduce timing signal.
-        var passwordValid = user is not null
-            && user.IsActive
-            && passwordHasher.Verify(user, user.PasswordHash, request.Password);
+        // never disclose which. Always run exactly one password verification, including when the
+        // account does not exist or is inactive, to reduce account-enumeration timing signals.
+        bool passwordValid;
+        if (user is null)
+        {
+            passwordHasher.VerifyDummy(request.Password);
+            passwordValid = false;
+        }
+        else
+        {
+            passwordValid = passwordHasher.Verify(user, user.PasswordHash, request.Password);
+        }
 
-        if (user is null || !passwordValid)
+        if (user is null || !user.IsActive || !passwordValid)
         {
             return Unauthorized();
         }
 
-        var response = await IssueAndStoreTokensAsync(user, ct);
-
+        var response = IssueAndStoreTokens(user);
         user.LastLoginAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
 
@@ -57,22 +68,36 @@ public class AuthController(
     public async Task<IActionResult> Refresh([FromBody] RefreshTokenRequest request, CancellationToken ct)
     {
         var tokenHash = tokenService.HashRefreshToken(request.RefreshToken);
+        var strategy = db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync<IActionResult>(async () =>
+        {
+            // A retry must not inherit tracked token/user state from the failed attempt.
+            db.ChangeTracker.Clear();
 
-        var stored = await db.RefreshTokens
-            .Include(rt => rt.User).ThenInclude(u => u.Role)
-            .SingleOrDefaultAsync(rt => rt.TokenHash == tokenHash, ct);
+            await using var tx = await db.Database.BeginTransactionAsync(ct);
+
+        // Lock the presented token row before testing/revoking it. Without this, two concurrent
+        // requests can both observe IsActive and each mint a valid successor token.
+            var tokenId = await LockRefreshTokenAsync(tokenHash, ct);
+            var stored = tokenId is Guid id
+                ? await db.RefreshTokens.Include(rt => rt.User).ThenInclude(u => u.Role)
+                    .SingleAsync(rt => rt.Id == id, ct)
+                : null;
 
         // Reject unknown, expired, or already-revoked tokens (and inactive users) — all as a flat 401.
-        if (stored is null || !stored.IsActive || !stored.User.IsActive)
-        {
-            return Unauthorized();
-        }
+            if (stored is null || !stored.IsActive || !stored.User.IsActive)
+            {
+                return Unauthorized();
+            }
 
         // Rotate: revoke the presented token, then issue a fresh pair.
-        stored.RevokedAt = DateTimeOffset.UtcNow;
+            stored.RevokedAt = DateTimeOffset.UtcNow;
 
-        var response = await IssueAndStoreTokensAsync(stored.User, ct);
-        return Ok(response);
+            var response = IssueAndStoreTokens(stored.User);
+            await db.SaveChangesAsync(ct);
+            await tx.CommitAsync(ct);
+            return Ok(response);
+        });
     }
 
     /// <summary>Revoke a refresh token. Idempotent — an unknown/already-revoked token still returns 204.</summary>
@@ -95,7 +120,7 @@ public class AuthController(
     }
 
     /// <summary>Issue a token pair, persist the refresh token's hash, and shape the response.</summary>
-    private async Task<TokenResponse> IssueAndStoreTokensAsync(User user, CancellationToken ct)
+    private TokenResponse IssueAndStoreTokens(User user)
     {
         var issued = tokenService.IssueTokens(user);
 
@@ -107,8 +132,25 @@ public class AuthController(
             ExpiresAt = issued.RefreshTokenExpiresAt,
             CreatedAt = DateTimeOffset.UtcNow
         });
-        await db.SaveChangesAsync(ct);
-
         return new TokenResponse(issued.AccessToken, issued.RefreshToken, issued.AccessTokenExpiresAt);
+    }
+
+    private async Task<Guid?> LockRefreshTokenAsync(string tokenHash, CancellationToken ct)
+    {
+        var connection = db.Database.GetDbConnection();
+        if (connection.State != System.Data.ConnectionState.Open)
+        {
+            await connection.OpenAsync(ct);
+        }
+
+        await using var command = connection.CreateCommand();
+        command.Transaction = db.Database.CurrentTransaction!.GetDbTransaction();
+        command.CommandText = "SELECT id FROM refresh_tokens WHERE token_hash = @token_hash FOR UPDATE";
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = "token_hash";
+        parameter.Value = tokenHash;
+        command.Parameters.Add(parameter);
+        var result = await command.ExecuteScalarAsync(ct);
+        return result is Guid id ? id : null;
     }
 }

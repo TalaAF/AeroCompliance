@@ -12,9 +12,9 @@ public sealed class ImageUploadForm
     public DateTimeOffset? CapturedAt { get; init; }
     [Range(-90, 90)] public double? Latitude { get; init; }
     [Range(-180, 180)] public double? Longitude { get; init; }
-    public decimal? AltitudeM { get; init; }
-    public decimal? CameraHeadingDeg { get; init; }
-    public decimal? GpsAccuracyCm { get; init; }
+    [Range(0, 10000)] public decimal? AltitudeM { get; init; }
+    [Range(0, 360)] public decimal? CameraHeadingDeg { get; init; }
+    [Range(0, 100000)] public decimal? GpsAccuracyCm { get; init; }
     public string? MockScenario { get; init; }
 
     /// <summary>

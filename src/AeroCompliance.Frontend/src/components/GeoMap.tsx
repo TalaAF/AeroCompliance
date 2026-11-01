@@ -62,6 +62,13 @@ const LEGEND: Array<[FeatureKind, string]> = [
 ];
 const PARENT_STYLE: L.PathOptions = { color: "#64748b", weight: 2, dashArray: "6 4", fillOpacity: 0.03 };
 
+/** Leaflet treats string tooltip content as HTML. Use a text node for every API-supplied label. */
+function textTooltip(value: string): HTMLElement {
+  const content = document.createElement("span");
+  content.textContent = value;
+  return content;
+}
+
 export default function GeoMap({
   points = [],
   features = [],
@@ -126,7 +133,7 @@ export default function GeoMap({
         fillColor: "#facc15",
         fillOpacity: 0.9,
       })
-        .bindTooltip(p.label ?? "Image")
+        .bindTooltip(textTooltip(p.label ?? "Image"))
         .addTo(layer);
       bounds.push([p.lat, p.lon]);
     }
@@ -136,7 +143,7 @@ export default function GeoMap({
         const parentLayer = L.geoJSON(parentFeature.geometry as GeoJSON.GeoJsonObject, {
           style: PARENT_STYLE,
         });
-        parentLayer.bindTooltip(`${parentFeature.label} (reference)`);
+        parentLayer.bindTooltip(textTooltip(`${parentFeature.label} (reference)`));
         parentLayer.addTo(layer);
         const b = parentLayer.getBounds();
         if (b.isValid()) bounds.push(b.getSouthWest(), b.getNorthEast());
@@ -150,7 +157,7 @@ export default function GeoMap({
         const geoLayer = L.geoJSON(f.geometry as GeoJSON.GeoJsonObject, {
           style: STYLE[f.kind],
         });
-        if (f.label) geoLayer.bindTooltip(f.label);
+        if (f.label) geoLayer.bindTooltip(textTooltip(f.label));
         geoLayer.addTo(layer);
         const b = geoLayer.getBounds();
         if (b.isValid()) bounds.push(b.getSouthWest(), b.getNorthEast());

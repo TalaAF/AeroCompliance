@@ -50,6 +50,9 @@ public sealed class AnalysisResultConsumer(IConnection connection, IServiceScope
         var strategy = db.Database.CreateExecutionStrategy();
         await strategy.ExecuteAsync(async () =>
         {
+            // A failed attempt may leave added entities tracked even though its transaction rolled
+            // back. Start each retry from database state before checking the inbox marker.
+            db.ChangeTracker.Clear();
             if (await db.InboxMessages.AnyAsync(x => x.EventId == eventId && x.Consumer == ConsumerName, ct)) return;
             await using var tx = await db.Database.BeginTransactionAsync(ct);
             var inbox = new InboxMessage { EventId = eventId, Consumer = ConsumerName, EventType = ea.RoutingKey,

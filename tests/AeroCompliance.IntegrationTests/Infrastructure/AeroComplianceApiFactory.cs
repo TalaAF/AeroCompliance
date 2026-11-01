@@ -18,6 +18,7 @@ public sealed class AeroComplianceApiFactory(string databaseConnectionString)
             .UseSetting("Jwt:Audience", "AeroCompliance.IntegrationTests.Client")
             .UseSetting("Jwt:SigningKey", TestSigningKey)
             .UseSetting("Jwt:AccessTokenMinutes", "15")
-            .UseSetting("Jwt:RefreshTokenDays", "7");
+            .UseSetting("Jwt:RefreshTokenDays", "7")
+            .UseSetting("Auth:LoginRateLimit:PermitLimit", "1000");
     }
 }

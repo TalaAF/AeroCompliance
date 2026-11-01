@@ -61,8 +61,24 @@ public sealed class DetectionComplianceController(
         {
             applied = await strategy.ExecuteAsync(async () =>
             {
+                db.ChangeTracker.Clear();
                 await using var tx = await db.Database.BeginTransactionAsync(ct);
-                var outcome = await ComplianceRuleEngine.EvaluateAsync(db, municipalityId.Value, detection, detection.ImageAnalysisId, ct, notify);
+                var currentDetection = await VisibleDetections()
+                    .Include(x => x.Image!).ThenInclude(i => i.Flight)
+                    .Include(x => x.Orthomosaic!).ThenInclude(o => o.Flight)
+                    .SingleAsync(x => x.Id == detectionId, ct);
+                var outcome = await ComplianceRuleEngine.EvaluateAsync(db, municipalityId.Value, currentDetection, currentDetection.ImageAnalysisId, ct, notify);
+                var passedCount = outcome.Count(x => x.Outcome == ComplianceOutcomes.Pass);
+                var failedCount = outcome.Count(x => x.Outcome == ComplianceOutcomes.Fail);
+                audit.Add("detection.compliance.reevaluate", "Detection", detectionId,
+                    after: new
+                    {
+                        rulesEvaluated = outcome.Count, passed = passedCount, failed = failedCount,
+                        notAssessed = outcome.Count - passedCount - failedCount,
+                        violationsCreated = outcome.Count(x => x.CreatedViolation),
+                        rules = outcome.Select(x => new { x.RuleLabel, x.Outcome, x.MeasuredValue, x.RequiredValue, x.Unit })
+                    },
+                    municipalityId: municipalityId);
                 await db.SaveChangesAsync(ct);
                 await tx.CommitAsync(ct);
                 return outcome;
@@ -78,15 +94,6 @@ public sealed class DetectionComplianceController(
         var failed = applied.Count(x => x.Outcome == ComplianceOutcomes.Fail);
         var notAssessed = applied.Count - passed - failed;
         var created = applied.Count(x => x.CreatedViolation);
-
-        audit.Add("detection.compliance.reevaluate", "Detection", detectionId,
-            after: new
-            {
-                rulesEvaluated = applied.Count, passed, failed, notAssessed, violationsCreated = created,
-                rules = applied.Select(x => new { x.RuleLabel, x.Outcome, x.MeasuredValue, x.RequiredValue, x.Unit })
-            },
-            municipalityId: municipalityId);
-        await db.SaveChangesAsync(ct);
 
         return Ok(new ReEvaluationResultDto(detectionId, applied.Count, passed, failed, notAssessed, created,
             Summarise(applied.Count, passed, failed, notAssessed, created), await ReadAsync(detectionId, ct)));

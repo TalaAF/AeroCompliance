@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using AeroCompliance.ApiService.Authorization;
 using AeroCompliance.ApiService.Services;
 using AeroCompliance.Contracts.Dtos.Reports;
@@ -30,7 +29,8 @@ public sealed class ViolationReportsController(
     /// violation. This is per-process: a multi-instance deployment would need a database or
     /// distributed lock instead.
     /// </summary>
-    private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InFlight = new();
+    private static readonly HashSet<Guid> InFlight = [];
+    private static readonly object InFlightSync = new();
 
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<ReportSummaryDto>>> List(Guid violationId, CancellationToken ct)
@@ -53,9 +53,11 @@ public sealed class ViolationReportsController(
     [HttpPost]
     public async Task<ActionResult<ReportSummaryDto>> Generate(Guid violationId, bool regenerate = false, CancellationToken ct = default)
     {
-        var gate = InFlight.GetOrAdd(violationId, _ => new SemaphoreSlim(1, 1));
-        if (!await gate.WaitAsync(TimeSpan.Zero, ct))
-            return Problem(statusCode: 409, title: "A report for this violation is already being generated.");
+        lock (InFlightSync)
+        {
+            if (!InFlight.Add(violationId))
+                return Problem(statusCode: 409, title: "A report for this violation is already being generated.");
+        }
         try
         {
             var violation = await LoadAsync(violationId, ct);
@@ -138,8 +140,7 @@ public sealed class ViolationReportsController(
         }
         finally
         {
-            gate.Release();
-            InFlight.TryRemove(violationId, out _);
+            lock (InFlightSync) InFlight.Remove(violationId);
         }
     }
 

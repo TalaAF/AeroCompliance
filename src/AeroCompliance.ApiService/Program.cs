@@ -10,6 +10,10 @@ using Microsoft.OpenApi;
 using AeroCompliance.Infrastructure.Notifications;
 using AeroCompliance.Infrastructure.Storage;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.AspNetCore.RateLimiting;
+using System.Net;
+using System.Threading.RateLimiting;
 
 // QuestPDF is source-available under the Community License (NOT MIT); its free tier is
 // eligibility-based and must be re-checked before any production municipal deployment.
@@ -47,10 +51,40 @@ builder.Services.Configure<FormOptions>(options => options.MultipartBodyLengthLi
 
 // Password hashing (Identity's PasswordHasher only — not the full Identity stack) + auth services.
 builder.Services.AddSingleton<PasswordHasher<User>>();
-builder.Services.AddScoped<IPasswordHasherService, PasswordHasherService>();
+builder.Services.AddSingleton<IPasswordHasherService, PasswordHasherService>();
 builder.Services.AddSingleton<ITokenService, TokenService>();
 builder.Services.AddScoped<DevUserSeeder>();
 builder.Services.AddScoped<DemoDataSeeder>();
+
+// Only trusted reverse proxies may supply the client address/protocol used by audit records,
+// HTTPS redirects, and login throttling. ASP.NET Core already trusts loopback (the bundled nginx);
+// other deployments must enumerate their proxy addresses explicitly.
+builder.Services.Configure<ForwardedHeadersOptions>(options =>
+{
+    options.ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto;
+    options.ForwardLimit = 1;
+    foreach (var value in builder.Configuration.GetSection("ReverseProxy:KnownProxies").Get<string[]>() ?? [])
+    {
+        if (!IPAddress.TryParse(value, out var address))
+            throw new InvalidOperationException("ReverseProxy:KnownProxies must contain literal IP addresses.");
+        options.KnownProxies.Add(address);
+    }
+});
+
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddPolicy("login", context => RateLimitPartition.GetFixedWindowLimiter(
+        partitionKey: context.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        factory: _ => new FixedWindowRateLimiterOptions
+        {
+            PermitLimit = Math.Max(1, builder.Configuration.GetValue("Auth:LoginRateLimit:PermitLimit", 10)),
+            Window = TimeSpan.FromSeconds(Math.Max(1,
+                builder.Configuration.GetValue("Auth:LoginRateLimit:WindowSeconds", 60))),
+            QueueLimit = 0,
+            AutoReplenishment = true
+        }));
+});
 
 // --- MVC + OpenAPI ---------------------------------------------------------
 builder.Services.AddControllers();
@@ -140,9 +174,12 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI(o => o.SwaggerEndpoint("/swagger/v1/swagger.json", "AeroCompliance API v1"));
 }
 
+app.UseForwardedHeaders();
+
 if (builder.Configuration.GetValue("HttpsRedirection:Enabled", true))
     app.UseHttpsRedirection();
 
+app.UseRateLimiter();
 app.UseAuthentication();
 app.UseAuthorization();
 

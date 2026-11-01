@@ -229,7 +229,7 @@ TensorFlow is **not** used anywhere in this codebase; the only ML dependency ref
    `outbox_messages` every second and publishes unpublished rows to RabbitMQ
    (`image.processing.requested.v1`).
 8. The AI Worker consumes the message, downloads the image from MinIO, and re-verifies the SHA-256.
-9. The Worker runs `MockModelRunner` (default) or `YoloModelRunner` (not functional yet — see §7).
+9. The Worker runs `MockModelRunner` (default) or `YoloModelRunner` when configured with a verified model (see §7).
 10. The Worker publishes `image.analysis.started.v1`, then `image.analysis.completed.v1` (with
     detections) or `image.analysis.failed.v1`.
 11. `AeroCompliance.ProcessingService` consumes these events idempotently (see below) via
