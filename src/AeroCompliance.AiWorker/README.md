@@ -17,13 +17,9 @@ Three explicit profiles, selected by the `AI_REQUIREMENTS` Docker build arg (def
 Each file only lists what it *adds* over the one before it (`-r <previous>.txt` at the top) — no
 duplicated version pins across files.
 
-**AppHost builds the `geospatial` profile by default**
-(`.WithBuildArg("AI_REQUIREMENTS", "requirements-geospatial.txt")` in `AppHost.cs`), so a normal
-local run gets real GeoTIFF metadata extraction without ever needing PyTorch/CUDA or a model file.
-`AI_MODE` is a separate, runtime environment variable and stays `mock` regardless of which profile
-was built — the profile only controls which *libraries exist in the image*.
-
-To switch profiles, change that one `WithBuildArg` line in `AppHost.cs`:
+**AppHost selects the profile from `AEROCOMPLIANCE_AI_MODE`.** The default `mock` launch builds the
+geospatial profile. Setting `AEROCOMPLIANCE_AI_MODE=yolo` builds the YOLO profile and mounts
+`models/best.pt` read-only. No source edit is needed.
 
 - **`"requirements.txt"`** — smallest/fastest image; mock detection only, no GeoTIFF raster metadata
   (a `.tif` upload still completes in mock mode, just with `SourceRasterCrs`/`RasterWidth`/
@@ -38,14 +34,11 @@ Building directly with plain `docker`:
 docker build --build-arg AI_REQUIREMENTS=requirements-geospatial.txt -t aerocompliance-ai-worker .
 ```
 
-**Verified in this workspace**: the `core` and `geospatial` images both build cleanly (core ~16s,
-~260 MB; geospatial ~35s, ~575 MB) and were run directly (`docker run --entrypoint python ...`) to
-confirm `HAS_RASTERIO`/`HAS_SHAPELY` are `True` only where expected, and that `ultralytics`/`torch`
-are absent from both. The `yolo` profile also builds successfully but is large (~10 GB) and slow
-(~15 minutes, dominated by downloading PyTorch/CUDA packages) — this was built once to confirm it
-completes and to verify the raster→`EPSG:4326` conversion utilities inside that exact image against a
-synthetic georeferenced GeoTIFF, then deleted (a 10 GB image isn't worth keeping locally). It was not
-kept running and no real model or real inference was run against it.
+**Verified in this workspace**: the core/geospatial profiles build and the YOLO profile builds and
+runs using CPU-only PyTorch. On 2026-10-05 the mounted checkpoint processed an un-georeferenced PNG
+in the live AppHost pipeline and returned 48 model-only predictions (45 building, 3 road), zero
+geographic detections and zero candidates. This verifies inference and the safety boundary, not
+accuracy or authoritative geographic processing.
 
 The Dockerfile also installs `libexpat1` unconditionally (a small `apt-get` layer) — rasterio's wheel
 dynamically loads it at import time, and `python:3.12-slim` does not ship it. Without this,
@@ -68,8 +61,8 @@ the image was built with the `geospatial` or `yolo` profile:
 In **`AI_MODE=mock`** this is best-effort only: a missing/invalid raster (or `rasterio` simply not
 being installed, on the `core` profile) is logged and simply means no raster metadata is attached to
 the `image.analysis.completed.v1` event — it never fails mock processing (mock detections don't need
-it). In **`AI_MODE=yolo`**, `YoloModelRunner.analyze()` requires it and fails the image
-(`AnalysisFailed`, retryable) if it's missing or invalid.
+it). In **`AI_MODE=yolo`**, missing georeferencing does not fail inference: predictions are retained
+as model-only, with no invented geometry and no geographic compliance evaluation.
 
 **A GeoTIFF's raster georeferencing is not the same fact as a JPEG's EXIF GPS tag.** EXIF GPS locates
 the camera/drone at one approximate point; a GeoTIFF's CRS + affine transform georeferences every
@@ -89,10 +82,10 @@ unique-constraint idempotency in `ProcessingService` and `ImagesController` — 
 ## Real YOLO — what is and is not done here
 
 `YoloModelRunner` (`aerocompliance_ai/model.py`) lazily imports `ultralytics` and loads
-`AI_MODEL_PATH` (default `/models/model.pt`) only when `AI_MODE=yolo` actually calls `analyze()`.
-When it runs, it requires the `yolo` profile (for `ultralytics`) and a genuinely georeferenced
-GeoTIFF, runs the model, and converts each detection's pixel-space mask (or bounding box, if the
-model has no segmentation head) into an `EPSG:4326` `MultiPolygon` via
+`AI_MODEL_PATH` (AppHost sets `/models/best.pt`) only when `AI_MODE=yolo` calls `analyze()`.
+It runs the model on supported imagery; when a usable raster georeference exists, it converts each
+detection's pixel-space mask (or bounding box, if the model has no segmentation head) into an
+`EPSG:4326` `MultiPolygon` via
 `geospatial.polygon_pixels_to_wgs84` / `build_multipolygon_geojson`, then returns detections in the
 exact shape `MockModelRunner` already produces — so no .NET contract changes are needed to switch.
 
@@ -118,8 +111,8 @@ Two corrections this surfaced:
 ### Georeferencing policy
 
 `YoloModelRunner` emits geographic geometry only when the source raster genuinely carries a CRS and
-affine transform. For a raster without them the model still runs — the detection count and class
-names are real and are logged — but **no geometry is produced and nothing is persisted**, because
+affine transform. For a raster without them the model still runs — the detection count/classes and
+model-only details are persisted on the analysis, but **no geographic geometry is produced**, because
 converting pixels to latitude/longitude without a transform would fabricate location data. Such an
 image completes successfully with zero geographic detections rather than failing.
 
@@ -135,5 +128,5 @@ GeoTIFF covering the Ramallah GIS extent is the one missing input.
    the OpenCV runtime libraries ultralytics links against.
 2. The `.pt` file is **never copied into the image** (`.dockerignore` excludes `models/*.pt`);
    AppHost bind-mounts it read-only at `/models/best.pt`.
-3. `AppHost.cs` selects `AI_MODE=yolo` by default; set `AEROCOMPLIANCE_AI_MODE=mock` to fall back
-   to the deterministic mock without editing code.
+3. AppHost selects `mock` by default; set `AEROCOMPLIANCE_AI_MODE=yolo` to run real inference without
+   editing code.

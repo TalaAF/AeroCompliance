@@ -1,4 +1,3 @@
-using System.Collections.Concurrent;
 using AeroCompliance.ApiService.Authorization;
 using AeroCompliance.ApiService.Services;
 using AeroCompliance.Contracts.Dtos.Reports;
@@ -20,7 +19,7 @@ namespace AeroCompliance.ApiService.Controllers;
 [ApiController, Route("api/violations/{violationId:guid}/reports"), Authorize(Policy = Policies.GenerateReports)]
 public sealed class ViolationReportsController(
     AeroComplianceDbContext db, ICurrentUserContext user, IObjectStorage storage, IAuditService audit,
-    INotificationService notify, ILogger<ViolationReportsController> logger) : ControllerBase
+    INotificationService notify, IConfiguration configuration, ILogger<ViolationReportsController> logger) : ControllerBase
 {
     private const string ConfirmedCode = "confirmed_under_notification";
     private const string HumanSource = "human_review";
@@ -30,7 +29,8 @@ public sealed class ViolationReportsController(
     /// violation. This is per-process: a multi-instance deployment would need a database or
     /// distributed lock instead.
     /// </summary>
-    private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InFlight = new();
+    private static readonly HashSet<Guid> InFlight = [];
+    private static readonly object InFlightSync = new();
 
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<ReportSummaryDto>>> List(Guid violationId, CancellationToken ct)
@@ -53,9 +53,11 @@ public sealed class ViolationReportsController(
     [HttpPost]
     public async Task<ActionResult<ReportSummaryDto>> Generate(Guid violationId, bool regenerate = false, CancellationToken ct = default)
     {
-        var gate = InFlight.GetOrAdd(violationId, _ => new SemaphoreSlim(1, 1));
-        if (!await gate.WaitAsync(TimeSpan.Zero, ct))
-            return Problem(statusCode: 409, title: "A report for this violation is already being generated.");
+        lock (InFlightSync)
+        {
+            if (!InFlight.Add(violationId))
+                return Problem(statusCode: 409, title: "A report for this violation is already being generated.");
+        }
         try
         {
             var violation = await LoadAsync(violationId, ct);
@@ -81,8 +83,11 @@ public sealed class ViolationReportsController(
             var now = DateTimeOffset.UtcNow;
             var reference = ReportReference.For(reportId, now);
             var key = $"reports/{municipalityId:N}/{violationId:N}/{reportId:N}.pdf";
+            var source = configuration.GetValue<bool>("DemoMode:Enabled") &&
+                Request.Headers.TryGetValue("X-AeroCompliance-Demo-Seed", out var demoSeed) &&
+                demoSeed.ToString() == "1" ? "demo_seed" : HumanSource;
 
-            var model = await BuildModelAsync(violation, reference, now, ct);
+            var model = await BuildModelAsync(violation, reference, now, source == "demo_seed", ct);
             byte[] pdf;
             try { pdf = ViolationReportPdf.Render(model); }
             catch (Exception ex)
@@ -97,10 +102,10 @@ public sealed class ViolationReportsController(
                 db.Reports.Add(new Report
                 {
                     Id = reportId, ViolationId = violationId, StoragePath = key,
-                    GeneratedBy = HumanSource, GeneratedAt = now
+                    GeneratedBy = source, GeneratedAt = now
                 });
                 audit.Add("report.generate", "Report", reportId,
-                    after: new { reference, violation = ReportReference.Violation(violationId), source = HumanSource, generatedAt = now },
+                    after: new { reference, violation = ReportReference.Violation(violationId), source, generatedAt = now },
                     municipalityId: municipalityId);
 
                 // Only the person who asked for the report is told it is ready, and the row and the
@@ -135,8 +140,7 @@ public sealed class ViolationReportsController(
         }
         finally
         {
-            gate.Release();
-            InFlight.TryRemove(violationId, out _);
+            lock (InFlightSync) InFlight.Remove(violationId);
         }
     }
 
@@ -164,7 +168,8 @@ public sealed class ViolationReportsController(
     private static Guid? Tenant(Violation v) =>
         v.Detection.Image?.Flight.MunicipalityId ?? v.Detection.Orthomosaic?.Flight.MunicipalityId;
 
-    private async Task<ViolationReportModel> BuildModelAsync(Violation v, string reference, DateTimeOffset now, CancellationToken ct)
+    private async Task<ViolationReportModel> BuildModelAsync(Violation v, string reference, DateTimeOffset now,
+        bool isSyntheticDemo, CancellationToken ct)
     {
         var decision = v.StatusHistory.Where(h => h.StatusId == v.CurrentStatusId)
             .OrderByDescending(h => h.ChangedAt).FirstOrDefault();
@@ -194,7 +199,8 @@ public sealed class ViolationReportsController(
             v.StatusHistory.OrderBy(h => h.ChangedAt)
                 .Select(h => (ReportsController.Label(h.Status), h.ChangedByUser?.FullName, h.ChangedAt, h.Notes)).ToList(),
             evidence,
-            unavailable);
+            unavailable,
+            isSyntheticDemo);
     }
 
     /// <summary>

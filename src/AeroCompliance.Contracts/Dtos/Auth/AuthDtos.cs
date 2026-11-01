@@ -17,10 +17,10 @@ public sealed class LoginRequest
         Password = password;
     }
 
-    [Required, EmailAddress]
+    [Required, EmailAddress, StringLength(200)]
     public string Email { get; init; } = null!;
 
-    [Required]
+    [Required, StringLength(1024)]
     public string Password { get; init; } = null!;
 }
 
@@ -34,7 +34,7 @@ public sealed class RefreshTokenRequest
     [JsonConstructor]
     public RefreshTokenRequest(string refreshToken) => RefreshToken = refreshToken;
 
-    [Required]
+    [Required, StringLength(512)]
     public string RefreshToken { get; init; } = null!;
 }
 
@@ -48,7 +48,7 @@ public sealed class LogoutRequest
     [JsonConstructor]
     public LogoutRequest(string refreshToken) => RefreshToken = refreshToken;
 
-    [Required]
+    [Required, StringLength(512)]
     public string RefreshToken { get; init; } = null!;
 }
 

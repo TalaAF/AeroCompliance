@@ -38,7 +38,8 @@ public sealed record ViolationReportModel(
     string? ReviewNotes,
     IReadOnlyList<(string Status, string? Actor, DateTimeOffset At, string? Notes)> History,
     byte[]? EvidenceImage,
-    string? EvidenceUnavailableReason);
+    string? EvidenceUnavailableReason,
+    bool IsSyntheticDemo = false);
 
 public static class ViolationReportPdf
 {
@@ -70,7 +71,8 @@ public static class ViolationReportPdf
             row.RelativeItem().Column(col =>
             {
                 col.Item().Text("AeroCompliance").FontSize(17).SemiBold().FontColor(Accent);
-                col.Item().Text("Municipal compliance report").FontSize(9).FontColor(Muted);
+                col.Item().Text(m.IsSyntheticDemo ? "SYNTHETIC DEMO REPORT - NOT ENFORCEMENT EVIDENCE"
+                    : "Municipal compliance report").FontSize(9).FontColor(Muted);
                 col.Item().PaddingTop(4).Text(m.MunicipalityName).FontSize(11).SemiBold();
             });
             row.ConstantItem(190).AlignRight().Column(col =>
@@ -119,7 +121,7 @@ public static class ViolationReportPdf
             rows.Add("AI confidence", Percent(m.DetectionConfidence));
         }));
 
-        col.Item().ShowEntire().Element(e => Section(e, "Human review", rows =>
+        col.Item().ShowEntire().Element(e => Section(e, m.IsSyntheticDemo ? "Demo review" : "Human review", rows =>
         {
             rows.Add("Decision", m.ReviewDecision);
             rows.Add("Reviewer", m.ReviewerName);
@@ -135,7 +137,9 @@ public static class ViolationReportPdf
         col.Item().ShowEntire().Element(e => Evidence(e, m));
 
         col.Item().ShowEntire().Background("#f8fafc").Border(1).BorderColor(Line).Padding(10)
-            .Text(Disclaimer).FontSize(9).Italic().FontColor(Muted);
+            .Text(m.IsSyntheticDemo
+                ? "Synthetic demonstration only. Imagery, GIS geometry, AI detections, review and locations are fictional or mock outputs. This document does not establish real AI accuracy or a real compliance finding."
+                : Disclaimer).FontSize(9).Italic().FontColor(Muted);
     });
 
     private static void History(IContainer container, ViolationReportModel m) =>

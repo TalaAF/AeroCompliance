@@ -187,6 +187,7 @@ public sealed class ReportsController(AeroComplianceDbContext db, ICurrentUserCo
     internal static string SourceLabel(string generatedBy) => generatedBy switch
     {
         "human_review" => "Human review",
+        "demo_seed" => "Synthetic demo workflow",
         "ai_draft" => "AI draft",
         _ => Words(generatedBy)
     };

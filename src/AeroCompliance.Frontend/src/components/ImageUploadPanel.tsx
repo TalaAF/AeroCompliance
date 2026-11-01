@@ -264,6 +264,7 @@ export default function ImageUploadPanel({
               <option value="none">None</option>
               <option value="building">Building</option>
               <option value="road_encroachment">Road encroachment</option>
+              <option value="road">Road feature (mock)</option>
               <option value="parcel_encroachment">Parcel encroachment</option>
               <option value="failure">Failure/retry check</option>
             </select>

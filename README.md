@@ -33,7 +33,7 @@ Inspector) can move it to `confirmed_under_notification` or `dismissed`.
   fields rather than required manual input. See "Automatic metadata extraction" in [§6](#6-ai-modes).
 - MinIO object storage for image bytes, with upload compensation (deletes the object if the DB write fails).
 - RabbitMQ-based asynchronous image processing (Outbox in the API, Inbox in the ProcessingService).
-- Python AI Worker in **mock mode**, fully wired end to end (upload → detection → violation).
+- Python AI Worker with deterministic **mock** mode and separately selectable real **YOLO** mode.
 - PostGIS-based compliance evaluation for road encroachment and parcel encroachment.
 - Violation confirm/dismiss review workflow with status history.
 - Dashboard summary endpoint (counts by violation status, recent violations).
@@ -45,48 +45,48 @@ Inspector) can move it to `confirmed_under_notification` or `dismissed`.
 - A reusable draw/import/advanced `GeometryEditor` (Leaflet + geoman) for Zone/Block/Parcel/Road and
   flight-planned-area forms, replacing raw GeoJSON text as the primary input — see "Drawing and
   editing boundaries in the frontend" in [§7](#7-crs-and-gis-rules).
-- Unit tests (16 test methods) and integration tests (13 test methods) — 29 `[Fact]`/`[Theory]` methods total.
+- Unit and integration suites (24 and 17 executed cases respectively on 2026-10-05), plus the
+  existing Phase 4 development smoke helper.
 
 ### Implemented in mock/development mode
 
-- **AI detection** — `AI_MODE=mock` is the default and only fully working mode; it generates a
+- **AI detection** — `AI_MODE=mock` is the default reliable demonstration mode; it generates a
   deterministic `building` detection polygon around the image's capture coordinates (or none/failure
   on request). See [§7](#7-ai-modes).
 - **Dev user seeding** — one user per role is auto-created on API startup in `Development`
   (`DevUserSeeder`), all sharing the password `ChangeMe123!`. Never runs outside `Development`.
 - **JWT signing key** — falls back to a hardcoded development key when unset, but only inside
   `Development`; startup throws outside it.
-- **File-type validation for uploads** — PNG/JPEG are only accepted in `Development` (to exercise the
-  mock pipeline); GeoTIFF is the only format the code path treats as production-real, and even then no
-  raster CRS/affine-transform reading is implemented yet (see below).
+- **File-type validation for uploads** — PNG/JPEG are accepted only in `Development`; GeoTIFF is
+  accepted in every environment. The worker reads usable raster CRS/affine metadata.
 
 ### Not yet implemented or not production-ready
 
-- **YOLO / real-model inference** — `YoloModelRunner.analyze()` unconditionally raises
-  `"YOLO georeferencing is not enabled in this phase; use AI_MODE=mock."` The class loads an
-  Ultralytics `YOLO(model_path)` model but never runs inference or georeferences pixel output. **No
-  real model has been verified or handed off.**
-- **Pixel → geographic coordinate conversion** for raster imagery (`geospatial.py` only contains a
-  guard that raises if CRS/affine transform are missing — no actual conversion is implemented).
-- **Notifications** — the `notifications` table and `Notification` entity exist; no controller, no
-  delivery logic.
+- **Model validation** — real YOLO inference is implemented and verified locally, but the current
+  labelled evidence is not sufficient for a defensible accuracy claim. Mock output is not accuracy
+  evidence.
+- **Authoritative real geographic demo input** — available ordinary validation imagery has no usable
+  raster transform. It produces model-only predictions and no compliance candidate by design.
+- **External notification delivery** — in-app notifications are implemented; delivery to police or
+  other external partners is not.
 - **Police alerts** — the `police_alerts` table and `PoliceAlert` entity exist; no controller, no
   dispatch logic.
 - **Orthomosaic processing** — the `Orthomosaic` entity and its detections relation exist in the
   schema; nothing populates or processes orthomosaics yet.
-- **Official municipality GIS import** — no import pipeline; zones/blocks/parcels/roads are created
-  through the CRUD API only (or the smoke-test script).
+- **Municipality GIS packaging** — a Development-only shapefile import command exists and local
+  source archives were supplied officially by the municipality, but redistribution permission and
+  an approved minimal judge package are not documented. Seed/synthetic records are not official GIS.
 - **`AeroCompliance.IngestionService`** — legacy/disabled. It is **not** referenced by
   `AppHost.cs` and does not run as part of a normal `dotnet run`. Its one endpoint is additionally
   gated behind `LegacyIngestion:Enabled` (off by default). `FlightImagesController` under
   `AeroCompliance.ApiService` is the sole authoritative upload path.
 - **Fine-grained permissions** — the `permissions`/`role_permissions` tables exist but authorization is
   role-based only (`[Authorize(Roles = ...)]` / policy `RequireRole`), not permission-based.
-- **Production deployment** — no production compose/Kubernetes manifests, no secret-store
-  integration, no HTTPS/CORS hardening beyond ASP.NET Core defaults.
-- **Automated test coverage of GIS/AI/violation flows** — the 29 existing tests cover authentication,
-  authorization policy shape, and the current-user endpoint; there is no automated test for the
-  upload → detection → violation pipeline (the `scripts/phase4_smoke.py` script does that manually).
+- **Production deployment** — a Docker Hub Compose distribution for local/demo use is available under
+  `deploy/docker-compose`; there is no hardened Kubernetes, secret-store, or HTTPS production setup.
+- **Automated test coverage of GIS/AI/violation flows** — xUnit coverage remains focused on
+  authentication/authorization. `scripts/phase4_smoke.py` is a development smoke helper, not
+  production test coverage.
 
 ## 2. Architecture
 
@@ -229,7 +229,7 @@ TensorFlow is **not** used anywhere in this codebase; the only ML dependency ref
    `outbox_messages` every second and publishes unpublished rows to RabbitMQ
    (`image.processing.requested.v1`).
 8. The AI Worker consumes the message, downloads the image from MinIO, and re-verifies the SHA-256.
-9. The Worker runs `MockModelRunner` (default) or `YoloModelRunner` (not functional yet — see §7).
+9. The Worker runs `MockModelRunner` (default) or `YoloModelRunner` when configured with a verified model (see §7).
 10. The Worker publishes `image.analysis.started.v1`, then `image.analysis.completed.v1` (with
     detections) or `image.analysis.failed.v1`.
 11. `AeroCompliance.ProcessingService` consumes these events idempotently (see below) via
@@ -278,16 +278,9 @@ from `AI_MODE` (mock vs. yolo): the profile controls which *libraries* are insta
 | `requirements-geospatial.txt` | core + `rasterio`, `shapely`, `pyproj` | **AppHost's default** — mock detection *and* real GeoTIFF metadata extraction |
 | `requirements-yolo.txt` | geospatial + `ultralytics` (pulls PyTorch) | Real YOLO inference once a `.pt` model is supplied |
 
-**AppHost builds the `geospatial` profile by default** (`AppHost.cs`:
-`.WithBuildArg("AI_REQUIREMENTS", "requirements-geospatial.txt")` on the `aiworker` resource), so a
-normal `dotnet run` gets working GeoTIFF metadata extraction out of the box — `AI_MODE` still
-defaults to `mock`, so no model or PyTorch/CUDA is required. To build the smaller core-only image
-instead (e.g. for a faster iteration loop when GeoTIFF isn't needed), change that one line to
-`"requirements.txt"`. To move toward real YOLO later, change it to `"requirements-yolo.txt"` and see
-[§20](#20-real-model-handoff). Verified in this workspace: the core and geospatial images both build
-and run correctly (see the AI Worker README for the exact commands and what was checked); the yolo
-profile builds (~10 GB, ~15 minutes, dominated by PyTorch/CUDA downloads) but has not been exercised
-with a real model.
+**AppHost chooses the dependency profile from the launch mode.** A normal run builds
+`requirements-geospatial.txt` and uses mock mode; setting `AEROCOMPLIANCE_AI_MODE=yolo` builds
+`requirements-yolo.txt` and mounts `models/best.pt` read-only. No code edit is required.
 
 ### `AI_MODE=mock` (current default)
 
@@ -313,15 +306,17 @@ with a real model.
 
 ### `AI_MODE=yolo`
 
-- Configuration: `AI_MODEL_PATH` (default `/models/model.pt`), `AI_CONFIDENCE_THRESHOLD` (default
-  `0.50`), `AI_MODEL_NAME` / `AI_MODEL_VERSION` (labels only, not validated against the model file).
+- AppHost configuration: model path `/models/best.pt`, threshold `0.25`, model label
+  `yolo26m-seg-aerocompliance`, version `2026-08-27`.
 - Optional dependency: `ultralytics` is installed only via the `yolo` profile
   ([requirements-yolo.txt](src/AeroCompliance.AiWorker/requirements-yolo.txt), which itself layers on
   `requirements-geospatial.txt`). The Worker's Dockerfile must be built with
   `--build-arg AI_REQUIREMENTS=requirements-yolo.txt` for YOLO mode to even import successfully.
 - Expected input: a georeferenced GeoTIFF (`.tif`/`.tiff`, MIME `image/tiff` or `image/geotiff`) —
   this is the **only** format `FlightImagesController.ValidFile` accepts outside `Development`.
-- Raster CRS + affine transform: **required**. [geospatial.py](src/AeroCompliance.AiWorker/aerocompliance_ai/geospatial.py)
+- Raster CRS + affine transform are **required for geographic output**, not for inference itself.
+  An un-georeferenced image completes with model-only predictions that cannot be evaluated for
+  compliance. [geospatial.py](src/AeroCompliance.AiWorker/aerocompliance_ai/geospatial.py)
   (Phase 5) reads both via `rasterio` (`extract_raster_metadata`) and converts pixel-space mask/box
   coordinates into `EPSG:4326` rings (`pixel_to_raster` → `raster_to_wgs84` →
   `build_multipolygon_geojson`, the last using `shapely` to validate/repair a part rather than drop a
@@ -337,11 +332,9 @@ with a real model.
   only when `analyze()` actually runs; it requires the raster/YOLO-capable build (`rasterio`
   installed) and a genuinely georeferenced input, runs the model, and converts each detection's
   segmentation mask (or bounding box, if the model has no mask head) into `EPSG:4326` via the
-  utilities above. **This is structurally complete but functionally unverified** — no `.pt` model or
-  representative georeferenced GeoTIFF has been available in this workspace to run it end to end.
-- **No real, verified model has been handed off or validated in this workspace.** The placeholder
-  `models/` directory and `AI_MODEL_PATH` wiring exist so a teammate can drop in a model later, but
-  nothing here should be described as production-ready.
+  utilities above. The local checkpoint has been run successfully. On 2026-10-05 an un-georeferenced
+  validation PNG produced 48 real model-only predictions, zero geographic detections and zero
+  candidates. This proves inference/configuration, not accuracy or geographic validation.
 
 ### Automatic metadata extraction (Phase 5)
 
@@ -411,16 +404,14 @@ Normal users no longer have to manually type technical capture metadata:
   metre/area math: `AnalysisResultConsumer.Evaluate` transforms geometries into `32636` with
   `ST_Transform` before computing `ST_Area`/`ST_Intersection`/`ST_Difference`, then stores the result
   back as a plain numeric (`measured_value`, `exceedance_area_m2`) tagged with `metric_crs = 32636`.
-- **Pixel coordinates are not map coordinates.** `images` has `source_raster_crs`, `raster_width`,
-  `raster_height`, and `affine_transform` (jsonb) columns reserved for this, but nothing populates them
-  yet, and `geospatial.require_georeferencing` exists specifically to stop pixel output from being
-  treated as geographic output before that conversion is implemented.
-- A source shapefile's `.prj` file must be respected when importing external GIS data — there is no
-  automated import pipeline in this codebase yet, so this is a rule for whoever builds that importer,
-  not a check the system currently performs.
-- Any local GIS data present in a developer's environment (zones/roads/parcels created through the API
-  or `scripts/phase4_smoke.py`) is **demo/import data**, not official municipal data, unless a specific
-  import has been confirmed with the municipality.
+- **Pixel coordinates are not map coordinates.** The worker populates raster metadata and converts
+  masks/boxes only when the raster supplies a usable CRS and affine transform. Otherwise predictions
+  remain model-only and cannot create geographic compliance candidates.
+- The Development-only `import-gis` command reads shapefiles, records source checksums and CRS, and
+  converts accepted geometry to `EPSG:4326`.
+- Local source archives under `.local-data` were reported as officially supplied by the municipality.
+  Imported/derived layers and API/script-created records are separate. Official origin does not
+  establish redistribution permission, adoption or partnership.
 
 **Currently implemented compliance logic** (`AnalysisResultConsumer.Evaluate`, road/parcel only):
 
@@ -431,9 +422,9 @@ Normal users no longer have to manually type technical capture metadata:
 3. **Parcel encroachment**: only checked if no road matched. Pick the parcel with the largest
    intersection against the detection; if the area of the detection *outside* that parcel exceeds
    `0.01 m²`, create a `parcel_encroachment` violation with `measured_value` = the outside area.
-4. **What is still simplified / not implemented**: no zoning-rule evaluation (`RuleId` is always
-   `null`), no setback/height/coverage-ratio checks against `zoning_rules.rule_value`, no orthomosaic
-   detections, and no multi-detection aggregation per image.
+4. A configurable zoning-rule engine also evaluates supported setback, height, coverage and allowed-
+   use rules with applicability/precedence controls. Orthomosaic processing and cross-image
+   aggregation remain out of scope.
 
 ### Drawing and editing boundaries in the frontend
 
@@ -593,10 +584,9 @@ unchanged from Phase 6.
 
 ### Demonstration data
 
-The development database carries one clearly-labelled demo rule — **minimum road setback of 3 m on
-zone `RML-Z01`**, active and validated, with `source_document` set to
-*"Development demonstration data - not an official Ramallah municipal regulation."* It exists to
-demonstrate the engine and **does not represent any actual Ramallah municipal regulation.**
+No zoning rule is seeded by migrations. Demonstration scripts may create synthetic GIS, but the
+competition verifier does not invent an official municipal regulation. Add an approved rule only
+through an explicitly labelled, controlled demo dataset.
 
 ## 8. Database model
 
@@ -653,8 +643,8 @@ PostgreSQL + PostGIS via EF Core migrations under
 | `violation_statuses` | The seven fixed status codes/labels (see §10) | Migration seed only |
 | `violations` | A candidate/decided violation, links to detection/parcel/road/rule | `ProcessingService` (create), `ViolationsController` (confirm/dismiss) |
 | `violation_status_history` | Every status change with actor and notes | `ProcessingService`, `ViolationsController` |
-| `reports` | PDF report metadata/sign-off | schema only — no controller |
-| `notifications` | Notification delivery records | schema only — no controller |
+| `reports` | PDF report metadata and object-storage reference | report controllers/services |
+| `notifications` | In-app notification and per-user delivery/read state | processing/review flows and notifications controller |
 | `police_alerts` | Police-alert dispatch records | schema only — no controller |
 | `audit_logs` | Actor, action, entity, before/after JSON, municipality, IP | `AuditService`, called from every mutating controller and `ProcessingService` |
 
@@ -920,7 +910,8 @@ JPEG or PNG, or a plain-language note when it is GeoTIFF; and the disclaimer "AI
 decision-support evidence. The recorded violation outcome reflects human review in AeroCompliance."
 
 ### Notifications, police alerts
-Not implemented — no controllers exist for these; see §1.
+In-app notifications and read state are implemented. Police-alert/external-partner dispatch remains
+schema-only and must not be presented as an active integration.
 
 ### Health
 | Method & path | Purpose |
@@ -952,9 +943,9 @@ docker compose version
 ## 14. Quick start
 
 ```powershell
-cd C:\Users\tala3\TalaProjects\GeoGuard\DroneProject
+# From the repository root
 dotnet restore AeroCompliance.slnx
-dotnet run --project src\AeroCompliance.AppHost
+dotnet run --project src\AeroCompliance.AppHost --launch-profile https
 ```
 
 `dotnet restore` is only needed the first time (or after adding/upgrading a package) — `dotnet run`
@@ -985,6 +976,27 @@ What happens next:
 - To stop everything safely: press `Ctrl+C` in the `dotnet run` terminal (or stop the AppHost process
   from the dashboard) — this stops the orchestrated containers along with it. Named volumes
   (`aerocompliance-pgdata-v2`, etc.) persist your data between runs.
+
+### Docker Hub Compose distribution
+
+The source-free local/demo distribution is in [`deploy/docker-compose`](deploy/docker-compose/README.md).
+After copying `.env.example` to `.env` and replacing its placeholder secrets:
+
+```powershell
+cd deploy\docker-compose
+docker compose pull
+docker compose up -d
+```
+
+Open `http://localhost:8080`. This distribution is pinned to Linux AMD64 images; Aspire development
+continues to use the commands above.
+
+### Self-contained Docker demo
+
+For a source-free demo without Compose or configuration files, use the single Linux AMD64 image
+documented in [`deploy/single-container`](deploy/single-container/README.md). It generates demo
+credentials on first startup, prints the login through `docker logs`, and persists the complete
+stack under `/var/lib/aerocompliance` in one named volume.
 
 ## 15. Using the system
 
@@ -1150,7 +1162,8 @@ variables directly, which take priority for those keys.
 | RabbitMQ | Aspire resource `messaging`, `rabbitmq-user`/`rabbitmq-password` parameters | `RABBITMQ_URL` / `ConnectionStrings__messaging` env var reaches the AI Worker |
 | MinIO | `MinIO__Endpoint`, `MinIO__AccessKey`, `MinIO__SecretKey`, `MinIO__Bucket` (ApiService); `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`, `MINIO_SECURE`, `MINIO_BUCKET` (AI Worker) | All set by `AppHost.cs`; `minio-root-user`/`minio-root-password` parameters are the dev credentials |
 | Upload limits | `Uploads:MaxBytes` (default `262144000` = 250 MB) | Also caps `RequestSizeLimit`/`MultipartBodyLengthLimit` on the upload action |
-| AI Worker mode | `AI_MODE` (`mock`/`yolo`) | Set to `mock` by `AppHost.cs`; change there or override per-container to test `yolo` |
+| AI Worker mode | `AEROCOMPLIANCE_AI_MODE` (`mock`/`yolo`) | AppHost selects the matching dependency profile; default is `mock` |
+| Isolated local data | `AEROCOMPLIANCE_RESOURCE_SUFFIX` | Optional suffix for Postgres/RabbitMQ/MinIO volume names; use for judging/tests |
 | Model configuration | `AI_MODEL_PATH`, `AI_CONFIDENCE_THRESHOLD`, `AI_MODEL_NAME`, `AI_MODEL_VERSION` | See §7 |
 | CRS | Hardcoded in code, not configurable: `4326` storage/output, `32636` metric compliance math | See §7 |
 | Frontend/API proxy | `API_UPSTREAM` (nginx template var, container), `VITE_API_PROXY` (local `vite dev` only) | AppHost sets `API_UPSTREAM` to the apiservice HTTPS endpoint |
@@ -1163,32 +1176,25 @@ deployment, which this repository does not yet define (see §24).
 
 ## 20. Real model handoff
 
-Checklist for the teammate delivering a trained model, based on the current Worker implementation:
+Current handoff checklist (verified 2026-10-05):
 
 1. **Model file format**: a YOLO/Ultralytics-compatible `.pt` weights file (`YoloModelRunner` calls
    `ultralytics.YOLO(settings.model_path)`).
-2. **Where to place it**: mount/copy it so the container sees it at the path in `AI_MODEL_PATH`
-   (default `/models/model.pt`). The AppHost's `models` reference in the AI Worker project directory
-   (`src/AeroCompliance.AiWorker/models`) is a convenient local mount point, but is **not** the only
-   valid location — anything reachable at `AI_MODEL_PATH` inside the container works.
-3. **Switch the dependency profile**: change the `aiworker` resource's build arg in `AppHost.cs` from
-   `.WithBuildArg("AI_REQUIREMENTS", "requirements-geospatial.txt")` to
-   `"requirements-yolo.txt"` — this is the only Dockerfile-level change needed; it pulls in
-   `ultralytics`/PyTorch on top of the geospatial dependencies AppHost already builds by default (see
-   the AI Worker README's "Dependency profiles").
-4. **Environment variables to change**: `AI_MODE=yolo`, `AI_MODEL_PATH` (if not the default),
-   `AI_CONFIDENCE_THRESHOLD`, `AI_MODEL_NAME`/`AI_MODEL_VERSION` (for labeling, not validated) — set
-   these on the `aiworker` container resource in `AppHost.cs`.
-5. **Why GeoTIFF is required**: only a GeoTIFF carries the raster CRS and affine transform needed to
-   convert YOLO's pixel-space bounding boxes/masks into real map coordinates; PNG/JPEG have no
-   georeferencing metadata, which is why they're accepted only as a `Development` mock-mode
-   convenience.
+2. **Where to place it**: `src/AeroCompliance.AiWorker/models/best.pt`. AppHost bind-mounts it
+   read-only at `/models/best.pt`; the file remains ignored by Git.
+3. **Verify identity**: expected SHA-256 is
+   `577EC6F619B5E22A462B0AC62D5A55722CDED832EA07FBAF70F01D93786479F8`.
+4. **Select the mode**: set `AEROCOMPLIANCE_AI_MODE=yolo`. AppHost automatically selects the YOLO
+   dependency profile and model configuration; no source edit is required.
+5. **Why GeoTIFF is required for geographic output**: only a properly georeferenced raster carries
+   the CRS and affine transform needed to convert pixel masks to map coordinates. In Development,
+   PNG/JPEG can still prove real model inference; their predictions remain model-only.
 6. **Class IDs/names**: `AnalysisDetection` carries both `ClassId` (int) and `ClassName` (string) —
    the real model's output must populate both, and `ProcessingService.Evaluate` currently only reacts
    to `ClassLabel` values of `"building"` or `"violation"` (extend that switch to add more classes).
-7. **Starting YOLO mode**: after steps 2–4, `dotnet run --project src/AeroCompliance.AppHost` (the
-   first build of the `yolo` profile is large/slow — ~10 GB, ~15 minutes, dominated by PyTorch/CUDA
-   downloads; this is expected).
+7. **Starting YOLO mode**: set the environment variable above, then run
+   `dotnet run --project src/AeroCompliance.AppHost --launch-profile https`. The first YOLO image
+   build is materially larger/slower than mock mode.
 8. **Checking readiness**: the Worker exposes `GET /ready` (`200` once the model is loaded and RabbitMQ/MinIO
    are connected, `503` otherwise) and `GET /health` (liveness) — both visible from the Aspire
    Dashboard's `aiworker` resource.
@@ -1201,9 +1207,8 @@ Checklist for the teammate delivering a trained model, based on the current Work
     step 3's build-arg switch actually happened — rebuilding with a stale Docker layer cache can
     otherwise silently keep the old profile); "missing CRS/invalid geometry" → the raster genuinely
     lacks embedded CRS/affine data, or is corrupt — `geospatial.extract_raster_metadata` raises a
-    specific `MISSING_GEOREFERENCING`/`INVALID_GEOREFERENCING` code in the image's
-    `last_error_code`/`GET /api/images/{id}/processing-status`; check the Worker's logs in the Aspire
-    Dashboard first.
+    a specific `MISSING_GEOREFERENCING`/`INVALID_GEOREFERENCING` diagnostic. Real inference on an
+    un-georeferenced image completes with model-only results; check the Worker and processing logs.
 
 Swapping in a real model should require **no changes to the .NET frontend or backend contracts** —
 `AnalysisDetection`/`ImageAnalysisCompleted` are already model-agnostic. **Do not commit the real
@@ -1215,25 +1220,24 @@ changed later (e.g., Git LFS, an artifact registry, or a mounted volume outside 
 ```powershell
 dotnet build AeroCompliance.slnx
 dotnet test AeroCompliance.slnx
-dotnet run --project src\AeroCompliance.AppHost
+dotnet run --project src\AeroCompliance.AppHost --launch-profile https
 ```
 
 The unit suite (`tests/AeroCompliance.UnitTests`) has no external dependency. The integration suite
 (`tests/AeroCompliance.IntegrationTests`) uses Testcontainers against the existing EF Core migrations
 and requires Docker Desktop (or another Docker-compatible engine) to be running; it provisions an
-isolated PostGIS database and never touches a developer database. Together the two projects currently
-hold 29 `[Fact]`/`[Theory]` test methods, focused on authentication, authorization-policy shape, and
-the current-user endpoint — not the GIS/upload/AI/violation pipeline.
+isolated PostGIS database and never touches a developer database. On 2026-10-05 the suites executed
+24 unit and 17 integration cases. They remain focused on authentication, authorization-policy shape
+and current-user behavior rather than the entire pipeline.
 
-**Phase 4 smoke script** (`scripts/phase4_smoke.py`):
+**Phase 4 smoke helper** (`scripts/phase4_smoke.py`):
 
 - Verifies the full upload → queue → AI mock → detection → compliance → violation → confirm → retry
   pipeline against a **running** system.
 - Requires: AppHost running with `apiservice`, `messaging`, `minio`, and `aiworker` healthy, and the
   seeded dev users present (i.e., `Development` environment).
 - Requires only a Python 3 interpreter with the standard library — no `pip install` needed.
-- Example invocation (defaults to `https://localhost:7096`; override with the actual Aspire-assigned
-  apiservice HTTPS URL if different):
+- Example invocation (use the actual Aspire-assigned API HTTPS URL):
   ```powershell
   $env:AEROCOMPLIANCE_BASE_URL = "https://localhost:PORT"
   python scripts/phase4_smoke.py
@@ -1243,7 +1247,8 @@ the current-user endpoint — not the GIS/upload/AI/violation pipeline.
   confirmed violation. These are ordinary rows in your local dev database — safe to leave, but not
   something to run against a shared or production database.
 
-Do not run `dotnet test` or `scripts/phase4_smoke.py` against a production database.
+Use a unique `AEROCOMPLIANCE_RESOURCE_SUFFIX` for disposable verification. Do not run the smoke
+helper against a shared or production database.
 
 ## 22. Docker volumes and data reset
 
@@ -1254,6 +1259,9 @@ AppHost defines these named volumes:
 | `aerocompliance-pgdata-v2` | `postgres` | All PostgreSQL/PostGIS data (every table in §8) |
 | `aerocompliance-rabbitdata-v2` | `messaging` | RabbitMQ's durable queues/exchanges/messages |
 | `aerocompliance-miniodata` | `minio` | Every uploaded image object |
+
+When `AEROCOMPLIANCE_RESOURCE_SUFFIX` is set, AppHost appends the validated suffix to all three
+volume names. This is the supported way to isolate judging or disposable verification data.
 
 The `-v2` suffix reflects that these are the current volumes in `AppHost.cs`; if an older
 `aerocompliance-pgdata` (without `-v2`) volume exists on your machine from a previous version of this
@@ -1295,15 +1303,13 @@ other projects on the same machine.
   its connection every 3 seconds and logs `worker connection failed: ...`.
 - **AI Worker not ready** — check `GET /ready` on the `aiworker` resource; it stays `503` until it can
   connect to RabbitMQ and MinIO.
-- **Missing model in YOLO mode** — `YoloModelRunner._load` raises a clear error if `ultralytics` isn't
-  installed (rebuild with `--build-arg AI_REQUIREMENTS=requirements-yolo.txt`, §6) or if
-  `AI_MODEL_PATH` doesn't point to an existing file — YOLO mode has not been run against a real model
-  in this workspace (§6, §20), so treat any real inference issue as needing hands-on debugging, not
-  as an already-known gap.
+- **Missing model in YOLO mode** — AppHost stops before launch if
+  `src/AeroCompliance.AiWorker/models/best.pt` is absent; otherwise `_load` reports dependency/path
+  errors. Verify the expected SHA-256 in §20 and rebuild the mode-selected image.
 - **Missing/invalid GeoTIFF CRS or affine transform** — expected behavior, not a bug:
   `geospatial.extract_raster_metadata` raises `MISSING_GEOREFERENCING`/`INVALID_GEOREFERENCING`
-  rather than guessing; in mock mode this is logged and simply leaves the image's raster fields
-  `null` (still `Completed`), in `AI_MODE=yolo` it fails the image (`AnalysisFailed`, retryable).
+  rather than guessing; in mock mode this leaves raster fields `null`. In YOLO mode inference still
+  completes, but predictions remain model-only and geographically ineligible.
 - **Image stuck in `Queued`/`Analyzing`** — check that `apiservice`'s `ProcessingOutboxDispatcher` is
   running (it's a hosted service inside ApiService, not a separate resource) and that `aiworker` is
   connected and consuming; check both services' logs in the dashboard.
@@ -1345,8 +1351,8 @@ production use:
   code only validates extension/MIME/magic-bytes and hash integrity.
 - Back up the Postgres volume and MinIO volume on a real schedule; local named volumes are not backups.
 - Add production monitoring/alerting on top of the OpenTelemetry data Aspire already emits.
-- **Verify the AI model and its training dataset** before relying on its output for any real
-  regulatory decision — this repository currently ships no verified model at all.
+- **Validate the AI model and its training dataset** before relying on output for any real regulatory
+  decision. The local checkpoint runs, but current labels do not support an accuracy claim.
 - Review handling of personal data — `parcels.owner_name` is personal data and is already
   access-restricted to certain roles in the API (`ParcelsController.Map`); confirm this matches your
   jurisdiction's requirements before going live.
@@ -1356,19 +1362,16 @@ production use:
 ## 25. Known limitations and next steps
 
 **Required for the next demo**
-- A verified end-to-end story stays in `AI_MODE=mock` — be explicit that this is simulated detection,
-  not a trained model.
-- Seed a small, consistent demo GIS dataset (zone/block/parcel/road) ahead of time so a live demo
-  doesn't depend on creating geometry on stage.
+- Use the verified mock path for the complete upload-to-report story and say that detection is
+  simulated. Present real YOLO model-only inference separately; do not convert it into an accuracy
+  or geographic-validation claim.
+- Use the synthetic competition verifier or an approved minimal municipal package. Never imply that
+  seeded/demo data are official.
 
 **Required before production**
-- A real, verified `.pt` model and a representative georeferenced GeoTIFF to actually run
-  `YoloModelRunner` end to end (§6, §20). The raster-to-`EPSG:4326` conversion path itself was built,
-  and verified inside the actual raster/YOLO-capable Docker image against a synthetic georeferenced
-  GeoTIFF (see the AI Worker README) — but `YoloModelRunner`'s own inference call has never run
-  against a real model or a real drone GeoTIFF.
-- Official municipality GIS import (current data is CRUD-entered demo data).
-- Notifications and police alerts — schema exists, no logic.
+- An approved representative georeferenced GeoTIFF and matching GIS/rules for a real geographic demo.
+- Written permission and a minimized package for municipality data/model redistribution.
+- External notification/police integration; only in-app notifications are implemented.
 - All of §24's security/production hardening items.
 - A production deployment target (compose/Kubernetes manifests, secret management, backups).
 - Automated test coverage for the GIS/upload/AI/violation pipeline (today only the smoke script

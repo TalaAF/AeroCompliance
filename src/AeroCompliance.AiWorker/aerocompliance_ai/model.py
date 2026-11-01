@@ -36,8 +36,10 @@ class MockModelRunner:
         delta = 0.00008
         ring = [[lon-delta,lat-delta],[lon+delta,lat-delta],[lon+delta,lat+delta],[lon-delta,lat+delta],[lon-delta,lat-delta]]
         detection_id = str(uuid.uuid5(uuid.UUID(request["requestId"]), "detection:0"))
+        road = scenario == "road"
         return AnalysisOutcome(detections=[{
-            "detectionId": detection_id, "classId": 0, "className": "building", "confidence": 0.93,
+            "detectionId": detection_id, "classId": 1 if road else 0,
+            "className": "road" if road else "building", "confidence": 0.91 if road else 0.93,
             "geometry": {"type": "MultiPolygon", "coordinates": [[[p for p in ring]]]},
             # The deterministic demonstration path is exact by construction, not an estimate.
             "resultSource": geospatial.SOURCE_MOCK_GEOGRAPHIC,

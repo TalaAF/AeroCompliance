@@ -63,10 +63,20 @@ public sealed class MinioObjectStorage : IObjectStorage
         var path = Path.Combine(Path.GetTempPath(), $"aerocompliance-read-{Guid.NewGuid():N}.tmp");
         var stream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 1024 * 1024,
             FileOptions.Asynchronous | FileOptions.DeleteOnClose);
-        await client.GetObjectAsync(new GetObjectArgs().WithBucket(Bucket).WithObject(objectKey)
-            .WithCallbackStream(async source => await source.CopyToAsync(stream, ct)), ct);
-        stream.Position = 0;
-        return stream;
+        try
+        {
+            // WithCallbackStream takes an Action<Stream>. An async lambda here becomes async void:
+            // MinIO closes its response stream before the copy finishes and can crash the process.
+            await client.GetObjectAsync(new GetObjectArgs().WithBucket(Bucket).WithObject(objectKey)
+                .WithCallbackStream(source => source.CopyTo(stream)), ct);
+            stream.Position = 0;
+            return stream;
+        }
+        catch
+        {
+            await stream.DisposeAsync();
+            throw;
+        }
     }
 
     public async Task<bool> ExistsAsync(string objectKey, CancellationToken ct = default)

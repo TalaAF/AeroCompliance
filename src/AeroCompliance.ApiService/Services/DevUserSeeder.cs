@@ -15,6 +15,8 @@ namespace AeroCompliance.ApiService.Services;
 public sealed class DevUserSeeder(
     AeroComplianceDbContext db,
     IPasswordHasherService passwordHasher,
+    IConfiguration configuration,
+    IHostEnvironment environment,
     ILogger<DevUserSeeder> logger)
 {
     /// <summary>DEV-ONLY shared password for all seeded users.</summary>
@@ -24,6 +26,16 @@ public sealed class DevUserSeeder(
 
     public async Task SeedAsync(CancellationToken cancellationToken = default)
     {
+        var configuredPassword = configuration["DemoSeed:Password"]?.Trim();
+        var password = string.IsNullOrWhiteSpace(configuredPassword)
+            ? environment.IsDevelopment()
+                ? DevPassword
+                : throw new InvalidOperationException(
+                    "DemoSeed:Password is required when demo seeding is enabled outside Development.")
+            : configuredPassword;
+        if (password.Length < 12)
+            throw new InvalidOperationException("DemoSeed:Password must contain at least 12 characters.");
+
         var created = 0;
 
         foreach (var role in Enum.GetValues<RoleName>())
@@ -49,7 +61,7 @@ public sealed class DevUserSeeder(
             };
 
             // Hash live (PasswordHasher salts per call, so this can't be precomputed in a migration).
-            user.PasswordHash = passwordHasher.Hash(user, DevPassword);
+            user.PasswordHash = passwordHasher.Hash(user, password);
 
             db.Users.Add(user);
             created++;
@@ -59,7 +71,7 @@ public sealed class DevUserSeeder(
         {
             await db.SaveChangesAsync(cancellationToken);
             logger.LogWarning(
-                "Seeded {Count} DEV test user(s) with the shared dev password. Do not use in production.",
+                "Seeded {Count} local demo user(s). Do not use these accounts in production.",
                 created);
         }
     }

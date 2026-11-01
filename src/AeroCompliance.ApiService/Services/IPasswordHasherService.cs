@@ -14,4 +14,10 @@ public interface IPasswordHasherService
 
     /// <summary>Verify a plaintext password against a stored hash.</summary>
     bool Verify(User user, string passwordHash, string providedPassword);
+
+    /// <summary>
+    /// Perform the same password-hash work as a real verification when no account was found.
+    /// This keeps the login failure path from becoming a useful account-enumeration timing signal.
+    /// </summary>
+    void VerifyDummy(string providedPassword);
 }

@@ -9,6 +9,21 @@
 
 var builder = DistributedApplication.CreateBuilder(args);
 
+// Keep the normal developer volumes unchanged, while allowing verification runs to use isolated
+// data stores. Example: AEROCOMPLIANCE_RESOURCE_SUFFIX=judge-20261005. The suffix is deliberately
+// restricted before it is used in a Docker volume name.
+var resourceSuffix = Environment.GetEnvironmentVariable("AEROCOMPLIANCE_RESOURCE_SUFFIX")?.Trim();
+if (!string.IsNullOrEmpty(resourceSuffix) &&
+    resourceSuffix.Any(character => !char.IsAsciiLetterOrDigit(character) && character is not '-' and not '_'))
+{
+    throw new InvalidOperationException(
+        "AEROCOMPLIANCE_RESOURCE_SUFFIX may contain only ASCII letters, digits, '-' and '_'.");
+}
+
+string VolumeName(string baseName) => string.IsNullOrEmpty(resourceSuffix)
+    ? baseName
+    : $"{baseName}-{resourceSuffix.ToLowerInvariant()}";
+
 // ---------------------------------------------------------------------------
 // PostgreSQL + PostGIS
 // ---------------------------------------------------------------------------
@@ -19,7 +34,7 @@ var postgresPassword = builder.AddParameter("postgres-password", secret: true);
 var postgres = builder.AddPostgres("postgres", password: postgresPassword)
     .WithImage("postgis/postgis")
     .WithImageTag("16-3.4")
-    .WithDataVolume("aerocompliance-pgdata-v2")
+    .WithDataVolume(VolumeName("aerocompliance-pgdata-v2"))
     .WithPgAdmin(); // local inspection UI
 
 var aeroDb = postgres.AddDatabase("aerocompliancedb");
@@ -31,7 +46,7 @@ var rabbitUser = builder.AddParameter("rabbitmq-user", secret: true);
 var rabbitPassword = builder.AddParameter("rabbitmq-password", secret: true);
 
 var rabbitmq = builder.AddRabbitMQ("messaging", rabbitUser, rabbitPassword)
-    .WithDataVolume("aerocompliance-rabbitdata-v2")
+    .WithDataVolume(VolumeName("aerocompliance-rabbitdata-v2"))
     .WithManagementPlugin(); // exposes the RabbitMQ management UI
 
 // ---------------------------------------------------------------------------
@@ -45,7 +60,7 @@ var minio = builder.AddContainer("minio", "minio/minio")
     .WithArgs("server", "/data", "--console-address", ":9001")
     .WithEnvironment("MINIO_ROOT_USER", minioRootUser)
     .WithEnvironment("MINIO_ROOT_PASSWORD", minioRootPassword)
-    .WithVolume("aerocompliance-miniodata", "/data")
+    .WithVolume(VolumeName("aerocompliance-miniodata"), "/data")
     .WithEndpoint(port: 9000, targetPort: 9000, name: "s3", scheme: "http")
     .WithEndpoint(port: 9001, targetPort: 9001, name: "console", scheme: "http");
 

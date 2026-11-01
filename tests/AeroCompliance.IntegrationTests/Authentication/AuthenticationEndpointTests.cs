@@ -55,6 +55,35 @@ public class AuthenticationEndpointTests(ApiTestFixture fixture)
     }
 
     [Fact]
+    public async Task Login_normalizes_email_case()
+    {
+        var user = await fixture.CreateUserAsync(RoleName.Inspector);
+        using var client = fixture.CreateClient();
+
+        var response = await client.PostAsJsonAsync(
+            "/api/auth/login",
+            new LoginRequest(user.Email.ToUpperInvariant(), ApiTestFixture.TestPassword));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Login_returns_429_after_configured_limit()
+    {
+        using var limitedFactory = fixture.CreateFactoryWithLoginLimit(2);
+        using var client = limitedFactory.CreateClient();
+        var request = new LoginRequest($"missing-{Guid.NewGuid():N}@example.test", "incorrect");
+
+        var first = await client.PostAsJsonAsync("/api/auth/login", request);
+        var second = await client.PostAsJsonAsync("/api/auth/login", request);
+        var third = await client.PostAsJsonAsync("/api/auth/login", request);
+
+        Assert.Equal(HttpStatusCode.Unauthorized, first.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, second.StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, third.StatusCode);
+    }
+
+    [Fact]
     public async Task Invalid_credentials_have_generic_unauthorized_responses_that_do_not_disclose_cause()
     {
         var activeUser = await fixture.CreateUserAsync(RoleName.Inspector);
@@ -97,6 +126,24 @@ public class AuthenticationEndpointTests(ApiTestFixture fixture)
         Assert.NotNull(rotated);
         Assert.NotEqual(original.RefreshToken, rotated.RefreshToken);
         Assert.NotNull(oldStoredToken?.RevokedAt);
+    }
+
+    [Fact]
+    public async Task Concurrent_refresh_only_rotates_presented_token_once()
+    {
+        var user = await fixture.CreateUserAsync(RoleName.Reviewer);
+        using var loginClient = fixture.CreateClient();
+        var original = await loginClient.LoginAsync(user);
+        using var firstClient = fixture.CreateClient();
+        using var secondClient = fixture.CreateClient();
+
+        var request = new RefreshTokenRequest(original.RefreshToken);
+        var responses = await Task.WhenAll(
+            firstClient.PostAsJsonAsync("/api/auth/refresh", request),
+            secondClient.PostAsJsonAsync("/api/auth/refresh", request));
+
+        Assert.Single(responses, response => response.StatusCode == HttpStatusCode.OK);
+        Assert.Single(responses, response => response.StatusCode == HttpStatusCode.Unauthorized);
     }
 
     [Fact]

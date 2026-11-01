@@ -1,0 +1,17 @@
+.git
+.gitignore
+.local-data
+.kilo
+.qodo
+.agents
+.codex
+**/bin
+**/obj
+**/node_modules
+**/dist
+**/__pycache__
+**/*.pyc
+src/AeroCompliance.AiWorker/models/*.pt
+!src/AeroCompliance.AiWorker/models/best.pt
+output
+tmp
