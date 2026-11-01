@@ -39,7 +39,32 @@ public sealed class OutboxMessageConfiguration : IEntityTypeConfiguration<Outbox
         b.Property(x => x.SchemaVersion).HasColumnName("schema_version"); b.Property(x => x.Payload).HasColumnName("payload").HasColumnType("jsonb");
         b.Property(x => x.CreatedAt).HasColumnName("created_at"); b.Property(x => x.PublishedAt).HasColumnName("published_at");
         b.Property(x => x.AttemptCount).HasColumnName("attempt_count"); b.Property(x => x.LastError).HasColumnName("last_error").HasMaxLength(1000);
+        b.Property(x => x.ClaimToken).HasColumnName("claim_token"); b.Property(x => x.ClaimUntil).HasColumnName("claim_until");
+        b.Property(x => x.NextAttemptAt).HasColumnName("next_attempt_at").HasDefaultValueSql("now()");
+        b.Property(x => x.FailedAt).HasColumnName("failed_at");
         b.HasIndex(x => x.PublishedAt);
+        b.HasIndex(x => new { x.FailedAt, x.NextAttemptAt, x.ClaimUntil });
+    }
+}
+
+public sealed class AiProcessingJobConfiguration : IEntityTypeConfiguration<AiProcessingJob>
+{
+    public void Configure(EntityTypeBuilder<AiProcessingJob> b)
+    {
+        b.ToTable("ai_processing_jobs", table =>
+            table.HasCheckConstraint("CK_ai_processing_jobs_state", "state IN ('processing', 'result_ready')"));
+        b.HasKey(x => x.RequestId);
+        b.Property(x => x.RequestId).HasColumnName("request_id");
+        b.Property(x => x.RequestHash).HasColumnName("request_hash").HasMaxLength(64).IsRequired();
+        b.Property(x => x.State).HasColumnName("state").HasMaxLength(20).IsRequired();
+        b.Property(x => x.LeaseToken).HasColumnName("lease_token");
+        b.Property(x => x.LeaseUntil).HasColumnName("lease_until");
+        b.Property(x => x.ResultRoutingKey).HasColumnName("result_routing_key").HasMaxLength(150);
+        b.Property(x => x.ResultPayload).HasColumnName("result_payload").HasColumnType("jsonb");
+        b.Property(x => x.AttemptCount).HasColumnName("attempt_count");
+        b.Property(x => x.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()");
+        b.Property(x => x.UpdatedAt).HasColumnName("updated_at").HasDefaultValueSql("now()");
+        b.HasIndex(x => new { x.State, x.LeaseUntil });
     }
 }
 

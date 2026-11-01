@@ -17,6 +17,18 @@ Requirements: Docker Engine or Docker Desktop using Linux AMD64 containers, with
 Data persists in named PostgreSQL, RabbitMQ and MinIO volumes. Stop without deleting data using
 `docker compose down`.
 
+## Processing upgrade
+
+The updated AI worker needs `ConnectionStrings__aerocompliancedb` and the additive
+`MultiInstanceProcessing` migration before consuming jobs. On an existing deployment,
+back up PostgreSQL, apply the migration with the repository's EF migration procedure,
+then start updated API and worker images. Production API startup does not apply migrations
+automatically. Keep the named volumes; do not use `docker compose down -v`.
+
+Failed outbox messages stay in the database after five publish attempts. See
+`docs/architecture/multi-instance-processing-2026-11-01.md` for inspection and selective
+retry SQL.
+
 ## Trusted frontend proxy
 
 The frontend nginx container reaches the API on the private `backend` Docker network. The API

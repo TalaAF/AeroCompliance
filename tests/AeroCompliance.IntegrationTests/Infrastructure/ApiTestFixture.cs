@@ -7,6 +7,8 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
+using AeroCompliance.Infrastructure.Storage;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using NetTopologySuite.Geometries;
 using Testcontainers.PostgreSql;
 
@@ -22,6 +24,8 @@ public sealed class ApiTestFixture : IAsyncLifetime
 
     private AeroComplianceApiFactory? _factory;
 
+    public IServiceProvider Services => Factory.Services;
+
     public HttpClient CreateClient()
         => Factory.CreateClient(new() { AllowAutoRedirect = false });
 
@@ -36,6 +40,20 @@ public sealed class ApiTestFixture : IAsyncLifetime
             builder.UseSetting("ReverseProxy:KnownProxies:0", trustedProxy);
             builder.ConfigureTestServices(services => services.AddTransient<IStartupFilter, TestRemoteIpStartupFilter>());
         });
+
+    public WebApplicationFactory<Program> CreateReportFactory(IObjectStorage storage)
+        => Factory.WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
+        {
+            services.RemoveAll<IObjectStorage>();
+            services.AddSingleton(storage);
+        }));
+
+    public async Task<int> CountReportsAsync(Guid violationId)
+    {
+        using var scope = Factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AeroComplianceDbContext>();
+        return await db.Reports.CountAsync(value => value.ViolationId == violationId);
+    }
 
     public async Task<System.Net.IPAddress?> FindAuditIpAsync(Guid entityId, string action)
     {

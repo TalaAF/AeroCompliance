@@ -120,6 +120,7 @@ services:
       AI_MODEL_NAME: ${AEROCOMPLIANCE_AI_MODEL_NAME:-aerocompliance-mock}
       AI_MODEL_VERSION: ${AEROCOMPLIANCE_AI_MODEL_VERSION:-1.0}
       RABBITMQ_URL: amqp://aerocompliance:${RABBITMQ_PASSWORD}@rabbitmq:5672
+      ConnectionStrings__aerocompliancedb: Host=postgres;Port=5432;Database=aerocompliance;Username=aerocompliance;Password=${POSTGRES_PASSWORD};Include Error Detail=false
       MINIO_ENDPOINT: http://minio:9000
       MINIO_ACCESS_KEY: aerocompliance
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}

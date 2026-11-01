@@ -1,5 +1,8 @@
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
+using AeroCompliance.ApiService.Services;
+using Microsoft.Extensions.Hosting;
 
 namespace AeroCompliance.IntegrationTests.Infrastructure;
 
@@ -10,6 +13,14 @@ public sealed class AeroComplianceApiFactory(string databaseConnectionString)
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
+        // Integration tests drive outbox dispatch explicitly; the background loop must not claim
+        // the same test rows while assertions are checking competing dispatchers.
+        builder.ConfigureTestServices(services =>
+        {
+            var dispatcher = services.SingleOrDefault(descriptor => descriptor.ServiceType == typeof(IHostedService) &&
+                descriptor.ImplementationType == typeof(ProcessingOutboxDispatcher));
+            if (dispatcher is not null) services.Remove(dispatcher);
+        });
         builder
             .UseEnvironment("Testing")
             .UseSetting("ConnectionStrings:aerocompliancedb", databaseConnectionString)

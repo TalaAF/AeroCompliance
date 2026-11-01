@@ -6,6 +6,7 @@ class Settings:
     mode: str = os.getenv("AI_MODE", "mock").lower()
     rabbitmq_url: str = os.getenv("RABBITMQ_URL") or os.environ["ConnectionStrings__messaging"]
     rabbitmq_heartbeat: int = int(os.getenv("RABBITMQ_HEARTBEAT_SECONDS", "60"))
+    database_connection_string: str = os.environ["ConnectionStrings__aerocompliancedb"]
     minio_endpoint: str = os.environ["MINIO_ENDPOINT"].replace("http://", "").replace("https://", "")
     minio_access_key: str = os.environ["MINIO_ACCESS_KEY"]
     minio_secret_key: str = os.environ["MINIO_SECRET_KEY"]

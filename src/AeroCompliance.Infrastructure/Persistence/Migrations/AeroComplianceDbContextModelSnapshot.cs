@@ -26,6 +26,68 @@ namespace AeroCompliance.Infrastructure.Persistence.Migrations
             NpgsqlModelBuilderExtensions.HasPostgresExtension(modelBuilder, "uuid-ossp");
             NpgsqlModelBuilderExtensions.UseIdentityByDefaultColumns(modelBuilder);
 
+            modelBuilder.Entity("AeroCompliance.Domain.Entities.AiProcessingJob", b =>
+                {
+                    b.Property<Guid>("RequestId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("request_id");
+
+                    b.Property<int>("AttemptCount")
+                        .HasColumnType("integer")
+                        .HasColumnName("attempt_count");
+
+                    b.Property<DateTimeOffset>("CreatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at")
+                        .HasDefaultValueSql("now()");
+
+                    b.Property<Guid?>("LeaseToken")
+                        .HasColumnType("uuid")
+                        .HasColumnName("lease_token");
+
+                    b.Property<DateTimeOffset?>("LeaseUntil")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("lease_until");
+
+                    b.Property<string>("RequestHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("request_hash");
+
+                    b.Property<string>("ResultPayload")
+                        .HasColumnType("jsonb")
+                        .HasColumnName("result_payload");
+
+                    b.Property<string>("ResultRoutingKey")
+                        .HasMaxLength(150)
+                        .HasColumnType("character varying(150)")
+                        .HasColumnName("result_routing_key");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasColumnName("state");
+
+                    b.Property<DateTimeOffset>("UpdatedAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at")
+                        .HasDefaultValueSql("now()");
+
+                    b.HasKey("RequestId");
+
+                    b.HasIndex("State", "LeaseUntil");
+
+                    b.ToTable("ai_processing_jobs", null, t =>
+                        {
+                            t.HasCheckConstraint("CK_ai_processing_jobs_state", "state IN ('processing', 'result_ready')");
+                        });
+                });
+
             modelBuilder.Entity("AeroCompliance.Domain.Entities.AuditLog", b =>
                 {
                     b.Property<long>("Id")
@@ -1101,14 +1163,32 @@ namespace AeroCompliance.Infrastructure.Persistence.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("attempt_count");
 
+                    b.Property<Guid?>("ClaimToken")
+                        .HasColumnType("uuid")
+                        .HasColumnName("claim_token");
+
+                    b.Property<DateTimeOffset?>("ClaimUntil")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("claim_until");
+
                     b.Property<DateTimeOffset>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
+
+                    b.Property<DateTimeOffset?>("FailedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("failed_at");
 
                     b.Property<string>("LastError")
                         .HasMaxLength(1000)
                         .HasColumnType("character varying(1000)")
                         .HasColumnName("last_error");
+
+                    b.Property<DateTimeOffset>("NextAttemptAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("next_attempt_at")
+                        .HasDefaultValueSql("now()");
 
                     b.Property<string>("Payload")
                         .IsRequired()
@@ -1138,6 +1218,8 @@ namespace AeroCompliance.Infrastructure.Persistence.Migrations
                     b.HasKey("EventId");
 
                     b.HasIndex("PublishedAt");
+
+                    b.HasIndex("FailedAt", "NextAttemptAt", "ClaimUntil");
 
                     b.ToTable("outbox_messages", (string)null);
                 });

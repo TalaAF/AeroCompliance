@@ -11,6 +11,25 @@ public class OutboxMessage
     public DateTimeOffset? PublishedAt { get; set; }
     public int AttemptCount { get; set; }
     public string? LastError { get; set; }
+    public Guid? ClaimToken { get; set; }
+    public DateTimeOffset? ClaimUntil { get; set; }
+    public DateTimeOffset NextAttemptAt { get; set; }
+    public DateTimeOffset? FailedAt { get; set; }
+}
+
+/// <summary>Durable AI result and lease for one stable processing request.</summary>
+public class AiProcessingJob
+{
+    public Guid RequestId { get; set; }
+    public string RequestHash { get; set; } = null!;
+    public string State { get; set; } = null!;
+    public Guid? LeaseToken { get; set; }
+    public DateTimeOffset? LeaseUntil { get; set; }
+    public string? ResultRoutingKey { get; set; }
+    public string? ResultPayload { get; set; }
+    public int AttemptCount { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
 }
 
 public class InboxMessage

@@ -102,6 +102,7 @@ var aiWorker = builder.AddContainer("aiworker", "aerocompliance-ai-worker")
     .WithDockerfile("../AeroCompliance.AiWorker")
     .WithBuildArg("AI_REQUIREMENTS", aiRequirements)
     .WithReference(rabbitmq)
+    .WithReference(aeroDb)
     .WithEnvironment("AI_MODE", aiMode)
     .WithEnvironment("AI_MODEL_PATH", "/models/best.pt")
     // Verified from the checkpoint itself: yolo26m-seg segmentation head, classes {0:building,
@@ -117,6 +118,7 @@ var aiWorker = builder.AddContainer("aiworker", "aerocompliance-ai-worker")
     .WithHttpEndpoint(targetPort: 8080, name: "http")
     .WithHttpHealthCheck("/ready")
     .WaitFor(rabbitmq)
+    .WaitFor(apiService)
     .WaitFor(minio);
 
 // Read-only mount of the real weights. Absent on a machine without the model, in which case the

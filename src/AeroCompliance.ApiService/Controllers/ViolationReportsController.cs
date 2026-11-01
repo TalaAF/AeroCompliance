@@ -24,14 +24,6 @@ public sealed class ViolationReportsController(
     private const string ConfirmedCode = "confirmed_under_notification";
     private const string HumanSource = "human_review";
 
-    /// <summary>
-    /// Guards against a double-submitted generate request producing two PDFs for the same
-    /// violation. This is per-process: a multi-instance deployment would need a database or
-    /// distributed lock instead.
-    /// </summary>
-    private static readonly HashSet<Guid> InFlight = [];
-    private static readonly object InFlightSync = new();
-
     [HttpGet]
     public async Task<ActionResult<IReadOnlyList<ReportSummaryDto>>> List(Guid violationId, CancellationToken ct)
     {
@@ -53,21 +45,29 @@ public sealed class ViolationReportsController(
     [HttpPost]
     public async Task<ActionResult<ReportSummaryDto>> Generate(Guid violationId, bool regenerate = false, CancellationToken ct = default)
     {
-        lock (InFlightSync)
-        {
-            if (!InFlight.Add(violationId))
-                return Problem(statusCode: 409, title: "A report for this violation is already being generated.");
-        }
+        // Keep this request's identity stable when EF retries an ambiguous commit.
+        var reportId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        var strategy = db.Database.CreateExecutionStrategy();
         try
         {
+            return await strategy.ExecuteAsync<ActionResult<ReportSummaryDto>>(async () =>
+        {
+            db.ChangeTracker.Clear();
+            await using var tx = await db.Database.BeginTransactionAsync(ct);
             var violation = await LoadAsync(violationId, ct);
             if (violation is null) return NotFound();
             if (violation.CurrentStatus.Code != ConfirmedCode)
                 return Problem(statusCode: 409, title: "The violation is not confirmed.",
                     detail: "A formal report can be generated after the violation is confirmed.");
+            if (!await ReportGenerationGate.TryAcquireAsync(db, violationId, ct))
+                return Problem(statusCode: 409, title: "A report for this violation is already being generated.");
 
-            // Without an explicit regenerate flag, a repeated submission returns what already exists
-            // rather than stacking up near-identical PDFs.
+            // A prior attempt may have committed before its response connection failed.
+            if (await db.Reports.AsNoTracking().AnyAsync(x => x.Id == reportId, ct))
+                return CreatedAtAction(nameof(ReportsController.Get), "Reports", new { id = reportId },
+                    await SummaryAsync(reportId, ct));
+
             if (!regenerate)
             {
                 var existing = await db.Reports.AsNoTracking().Where(x => x.ViolationId == violationId)
@@ -79,8 +79,6 @@ public sealed class ViolationReportsController(
             if (municipalityId is null)
                 return Problem(statusCode: 409, title: "The violation is not linked to a municipality.");
 
-            var reportId = Guid.NewGuid();
-            var now = DateTimeOffset.UtcNow;
             var reference = ReportReference.For(reportId, now);
             var key = $"reports/{municipalityId:N}/{violationId:N}/{reportId:N}.pdf";
             var source = configuration.GetValue<bool>("DemoMode:Enabled") &&
@@ -96,9 +94,12 @@ public sealed class ViolationReportsController(
                 return Problem(statusCode: 500, title: "The report could not be produced.");
             }
 
-            await storage.UploadBytesAsync(key, pdf, "application/pdf", ct);
+            var uploadAttempted = false;
+            var commitAttempted = false;
             try
             {
+                uploadAttempted = true;
+                await storage.UploadBytesAsync(key, pdf, "application/pdf", ct);
                 db.Reports.Add(new Report
                 {
                     Id = reportId, ViolationId = violationId, StoragePath = key,
@@ -108,39 +109,45 @@ public sealed class ViolationReportsController(
                     after: new { reference, violation = ReportReference.Violation(violationId), source, generatedAt = now },
                     municipalityId: municipalityId);
 
-                // Only the person who asked for the report is told it is ready, and the row and the
-                // notification commit together.
                 if (user.UserId is Guid requester)
                 {
                     var place = violation.Road?.RoadCode ?? violation.Parcel?.ParcelNumber ?? violation.Zone?.ZoneNumber;
                     var text = NotificationMessages.ReportGenerated(reference, place);
                     await notify.NotifyUserAsync(new NotificationRequest(
-                        municipalityId.Value,
-                        NotificationTypes.ReportGenerated,
-                        NotificationSeverities.Information,
-                        text.Title, text.Message,
+                        municipalityId.Value, NotificationTypes.ReportGenerated,
+                        NotificationSeverities.Information, text.Title, text.Message,
                         SourceEventKey: reportId.ToString("N"),
-                        RelatedEntityType: "Report",
-                        RelatedEntityId: reportId,
+                        RelatedEntityType: "Report", RelatedEntityId: reportId,
                         Route: NotificationRoutes.Report(reportId)), requester, ct);
                 }
                 await db.SaveChangesAsync(ct);
+                commitAttempted = true;
+                await tx.CommitAsync(ct);
             }
             catch
             {
-                // The PDF is already in storage but the row did not commit — remove the orphan so
-                // the bucket cannot accumulate objects no report record points at.
-                try { await storage.DeleteAsync(key, CancellationToken.None); }
-                catch (Exception cleanup) { logger.LogError(cleanup, "Orphaned report object {Key} could not be removed.", key); }
+                // An attempted COMMIT may have succeeded. Keep its PDF; the stable report ID
+                // makes a retry return the committed row rather than create another report.
+                if (uploadAttempted && !commitAttempted)
+                {
+                    try { await storage.DeleteAsync(key, CancellationToken.None); }
+                    catch (Exception cleanup)
+                    {
+                        logger.LogError(cleanup, "Orphaned report object {Key} could not be removed.", key);
+                    }
+                }
                 throw;
             }
 
-            var summary = await SummaryAsync(reportId, ct);
-            return CreatedAtAction(nameof(ReportsController.Get), "Reports", new { id = reportId }, summary);
+            return CreatedAtAction(nameof(ReportsController.Get), "Reports", new { id = reportId },
+                await SummaryAsync(reportId, ct));
+            });
         }
-        finally
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception ex)
         {
-            lock (InFlightSync) InFlight.Remove(violationId);
+            logger.LogError(ex, "Generating the report for violation {ViolationId} failed.", violationId);
+            return Problem(statusCode: 500, title: "The report could not be produced.");
         }
     }
 

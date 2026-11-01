@@ -5,6 +5,11 @@ Runs in `AI_MODE=mock` by default and consumes RabbitMQ processing requests. Hea
 
 ## Dependency profiles
 
+All profiles now include `psycopg` and require `ConnectionStrings__aerocompliancedb`.
+Apply the `MultiInstanceProcessing` migration before starting an updated worker. The
+worker stays unready until the `ai_processing_jobs` table exists. See
+`docs/architecture/multi-instance-processing-2026-11-01.md` for recovery behavior.
+
 Three explicit profiles, selected by the `AI_REQUIREMENTS` Docker build arg (default
 `requirements.txt`):
 

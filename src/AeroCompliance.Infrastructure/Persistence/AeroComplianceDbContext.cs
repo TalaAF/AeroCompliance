@@ -42,6 +42,7 @@ public class AeroComplianceDbContext(DbContextOptions<AeroComplianceDbContext> o
     public DbSet<ViolationStatusHistory> ViolationStatusHistory => Set<ViolationStatusHistory>();
     public DbSet<ComplianceEvaluation> ComplianceEvaluations => Set<ComplianceEvaluation>();
     public DbSet<OutboxMessage> OutboxMessages => Set<OutboxMessage>();
+    public DbSet<AiProcessingJob> AiProcessingJobs => Set<AiProcessingJob>();
     public DbSet<InboxMessage> InboxMessages => Set<InboxMessage>();
 
     // Reporting / notifications / audit

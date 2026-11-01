@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 
 os.environ.setdefault("ConnectionStrings__messaging", "amqp://guest:guest@127.0.0.1:5672")
+os.environ.setdefault("ConnectionStrings__aerocompliancedb", "Host=127.0.0.1;Database=test;Username=test;Password=test")
 os.environ.setdefault("MINIO_ENDPOINT", "127.0.0.1:9000")
 os.environ.setdefault("MINIO_ACCESS_KEY", "test")
 os.environ.setdefault("MINIO_SECRET_KEY", "test")
