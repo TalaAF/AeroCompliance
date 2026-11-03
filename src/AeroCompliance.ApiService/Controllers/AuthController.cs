@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
+using System.Buffers.Binary;
 
 namespace AeroCompliance.ApiService.Controllers;
 
@@ -20,8 +21,10 @@ namespace AeroCompliance.ApiService.Controllers;
 public class AuthController(
     AeroComplianceDbContext db,
     IPasswordHasherService passwordHasher,
-    ITokenService tokenService) : ControllerBase
+    ITokenService tokenService,
+    ILogger<AuthController> logger) : ControllerBase
 {
+    private static readonly TimeSpan ReuseGrace = TimeSpan.FromSeconds(10);
     /// <summary>Exchange email + password for an access + refresh token pair.</summary>
     [HttpPost("login")]
     [EnableRateLimiting("login")]
@@ -54,7 +57,7 @@ public class AuthController(
             return Unauthorized();
         }
 
-        var response = IssueAndStoreTokens(user);
+        var response = IssueAndStoreTokens(user, Guid.NewGuid());
         user.LastLoginAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(ct);
 
@@ -76,51 +79,75 @@ public class AuthController(
 
             await using var tx = await db.Database.BeginTransactionAsync(ct);
 
-        // Lock the presented token row before testing/revoking it. Without this, two concurrent
-        // requests can both observe IsActive and each mint a valid successor token.
-            var tokenId = await LockRefreshTokenAsync(tokenHash, ct);
+            // Serialize refresh/logout operations for this family before reading token state.
+            var tokenId = await LockRefreshFamilyAsync(tokenHash, ct);
             var stored = tokenId is Guid id
                 ? await db.RefreshTokens.Include(rt => rt.User).ThenInclude(u => u.Role)
                     .SingleAsync(rt => rt.Id == id, ct)
                 : null;
 
-        // Reject unknown, expired, or already-revoked tokens (and inactive users) — all as a flat 401.
-            if (stored is null || !stored.IsActive || !stored.User.IsActive)
+            // Return the same 401 for unknown, expired, revoked, or inactive tokens.
+            var now = await DatabaseNowAsync(ct);
+            if (stored is null || !stored.User.IsActive)
             {
                 return Unauthorized();
             }
 
-        // Rotate: revoke the presented token, then issue a fresh pair.
-            stored.RevokedAt = DateTimeOffset.UtcNow;
+            // An old rotated token is denied immediately. After the short window for
+            // concurrent requests, its reuse revokes only this login's descendants.
+            if (stored.RotatedAt is DateTimeOffset rotatedAt)
+            {
+                if (stored.ExpiresAt > now && now - rotatedAt >= ReuseGrace && stored.ReuseDetectedAt is null)
+                {
+                    await RevokeFamilyAsync(stored.FamilyId, now, ct);
+                    stored.ReuseDetectedAt = now;
+                    await db.SaveChangesAsync(ct);
+                    await tx.CommitAsync(ct);
+                    logger.LogWarning("Refresh-token reuse revoked family {FamilyId} for user {UserId}.",
+                        stored.FamilyId, stored.UserId);
+                }
+                return Unauthorized();
+            }
 
-            var response = IssueAndStoreTokens(stored.User);
+            if (stored.RevokedAt is not null || stored.ExpiresAt <= now) return Unauthorized();
+
+            // Rotate: revoke the presented token, then issue a fresh pair.
+            stored.RevokedAt = now;
+            stored.RotatedAt = now;
+
+            var response = IssueAndStoreTokens(stored.User, stored.FamilyId);
             await db.SaveChangesAsync(ct);
             await tx.CommitAsync(ct);
             return Ok(response);
         });
     }
 
-    /// <summary>Revoke a refresh token. Idempotent — an unknown/already-revoked token still returns 204.</summary>
+    /// <summary>Revoke the presented token's login family. Unknown or already-revoked tokens return 204.</summary>
     [HttpPost("logout")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> Logout([FromBody] LogoutRequest request, CancellationToken ct)
     {
         var tokenHash = tokenService.HashRefreshToken(request.RefreshToken);
 
-        var stored = await db.RefreshTokens
-            .SingleOrDefaultAsync(rt => rt.TokenHash == tokenHash, ct);
-
-        if (stored is { RevokedAt: null })
+        var strategy = db.Database.CreateExecutionStrategy();
+        return await strategy.ExecuteAsync<IActionResult>(async () =>
         {
-            stored.RevokedAt = DateTimeOffset.UtcNow;
-            await db.SaveChangesAsync(ct);
-        }
-
-        return NoContent();
+            db.ChangeTracker.Clear();
+            await using var tx = await db.Database.BeginTransactionAsync(ct);
+            var tokenId = await LockRefreshFamilyAsync(tokenHash, ct);
+            if (tokenId is Guid id)
+            {
+                var familyId = await db.RefreshTokens.Where(rt => rt.Id == id)
+                    .Select(rt => rt.FamilyId).SingleAsync(ct);
+                await RevokeFamilyAsync(familyId, await DatabaseNowAsync(ct), ct);
+                await tx.CommitAsync(ct);
+            }
+            return NoContent();
+        });
     }
 
     /// <summary>Issue a token pair, persist the refresh token's hash, and shape the response.</summary>
-    private TokenResponse IssueAndStoreTokens(User user)
+    private TokenResponse IssueAndStoreTokens(User user, Guid familyId)
     {
         var issued = tokenService.IssueTokens(user);
 
@@ -128,6 +155,7 @@ public class AuthController(
         {
             Id = Guid.NewGuid(),
             UserId = user.Id,
+            FamilyId = familyId,
             TokenHash = tokenService.HashRefreshToken(issued.RefreshToken),
             ExpiresAt = issued.RefreshTokenExpiresAt,
             CreatedAt = DateTimeOffset.UtcNow
@@ -135,8 +163,32 @@ public class AuthController(
         return new TokenResponse(issued.AccessToken, issued.RefreshToken, issued.AccessTokenExpiresAt);
     }
 
-    private async Task<Guid?> LockRefreshTokenAsync(string tokenHash, CancellationToken ct)
+    private Task<int> RevokeFamilyAsync(Guid familyId, DateTimeOffset now, CancellationToken ct) =>
+        db.RefreshTokens.Where(rt => rt.FamilyId == familyId && rt.RevokedAt == null)
+            .ExecuteUpdateAsync(update => update.SetProperty(rt => rt.RevokedAt, now), ct);
+
+    private async Task<DateTimeOffset> DatabaseNowAsync(CancellationToken ct)
     {
+        var connection = db.Database.GetDbConnection();
+        if (connection.State != System.Data.ConnectionState.Open) await connection.OpenAsync(ct);
+        await using var command = connection.CreateCommand();
+        command.Transaction = db.Database.CurrentTransaction!.GetDbTransaction();
+        // clock_timestamp() is current time even after waiting for the family lock.
+        command.CommandText = "SELECT clock_timestamp()";
+        var value = await command.ExecuteScalarAsync(ct);
+        return value switch
+        {
+            DateTimeOffset instant => instant,
+            DateTime instant => new DateTimeOffset(DateTime.SpecifyKind(instant, DateTimeKind.Utc)),
+            _ => throw new InvalidOperationException("PostgreSQL did not return its current timestamp.")
+        };
+    }
+
+    private async Task<Guid?> LockRefreshFamilyAsync(string tokenHash, CancellationToken ct)
+    {
+        var token = await db.RefreshTokens.AsNoTracking().Where(rt => rt.TokenHash == tokenHash)
+            .Select(rt => new { rt.Id, rt.FamilyId }).SingleOrDefaultAsync(ct);
+        if (token is null) return null;
         var connection = db.Database.GetDbConnection();
         if (connection.State != System.Data.ConnectionState.Open)
         {
@@ -145,12 +197,12 @@ public class AuthController(
 
         await using var command = connection.CreateCommand();
         command.Transaction = db.Database.CurrentTransaction!.GetDbTransaction();
-        command.CommandText = "SELECT id FROM refresh_tokens WHERE token_hash = @token_hash FOR UPDATE";
+        command.CommandText = "SELECT pg_advisory_xact_lock(@family_key)";
         var parameter = command.CreateParameter();
-        parameter.ParameterName = "token_hash";
-        parameter.Value = tokenHash;
+        parameter.ParameterName = "family_key";
+        parameter.Value = BinaryPrimitives.ReadInt64BigEndian(token.FamilyId.ToByteArray());
         command.Parameters.Add(parameter);
-        var result = await command.ExecuteScalarAsync(ct);
-        return result is Guid id ? id : null;
+        await command.ExecuteScalarAsync(ct);
+        return token.Id;
     }
 }

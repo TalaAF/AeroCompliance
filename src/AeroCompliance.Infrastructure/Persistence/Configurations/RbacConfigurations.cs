@@ -128,12 +128,16 @@ public class RefreshTokenConfiguration : IEntityTypeConfiguration<RefreshToken>
         b.HasKey(x => x.Id);
         b.Property(x => x.Id).HasColumnName("id").HasDefaultValueSql("uuid_generate_v4()");
         b.Property(x => x.UserId).HasColumnName("user_id").IsRequired();
+        b.Property(x => x.FamilyId).HasColumnName("family_id").IsRequired();
         b.Property(x => x.TokenHash).HasColumnName("token_hash").IsRequired();
         b.Property(x => x.ExpiresAt).HasColumnName("expires_at").IsRequired();
         b.Property(x => x.RevokedAt).HasColumnName("revoked_at");
+        b.Property(x => x.RotatedAt).HasColumnName("rotated_at");
+        b.Property(x => x.ReuseDetectedAt).HasColumnName("reuse_detected_at");
         b.Property(x => x.CreatedAt).HasColumnName("created_at").HasDefaultValueSql("now()");
 
         b.Ignore(x => x.IsActive);
+        b.HasIndex(x => x.FamilyId);
 
         b.HasOne(x => x.User)
             .WithMany(u => u.RefreshTokens)

@@ -63,15 +63,31 @@ api.interceptors.response.use(undefined, async (raw: AxiosError) => {
         .finally(() => {
           refreshPromise = null;
         });
+      let accessToken: string;
       try {
-        config.headers.Authorization = `Bearer ${await refreshPromise}`;
-        return api(config);
-      } catch {
-        clearTokens();
-        window.dispatchEvent(new Event("aerocompliance:expired"));
+        accessToken = await refreshPromise;
+      } catch (refreshError) {
+        if (axios.isAxiosError(refreshError)) {
+          if (
+            refreshError.response?.status === 400 ||
+            refreshError.response?.status === 401
+          ) {
+            clearTokens();
+            window.dispatchEvent(new Event("aerocompliance:expired"));
+          }
+          return Promise.reject(toApiError(refreshError));
+        }
+        return Promise.reject(refreshError);
       }
+      config.headers.Authorization = `Bearer ${accessToken}`;
+      return api(config);
     }
   }
+  return Promise.reject(toApiError(raw));
+});
+
+function toApiError(raw: AxiosError): ApiError {
+  const response = raw.response;
   const data = response?.data as
     | { title?: string; detail?: string; errors?: Record<string, string[]> }
     | undefined;
@@ -89,18 +105,16 @@ api.interceptors.response.use(undefined, async (raw: AxiosError) => {
     422: "The submitted data could not be processed.",
   };
   const status = response?.status ?? 0;
-  return Promise.reject(
-    new ApiError(
-      status,
-      validation ||
-        data?.detail ||
-        data?.title ||
-        fallback[status] ||
-        "The service is temporarily unavailable.",
-      data?.title,
-    ),
+  return new ApiError(
+    status,
+    validation ||
+      data?.detail ||
+      data?.title ||
+      fallback[status] ||
+      "The service is temporarily unavailable.",
+    data?.title,
   );
-});
+}
 
 export async function page<T>(
   url: string,

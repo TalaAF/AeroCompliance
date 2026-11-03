@@ -2,7 +2,10 @@ using System.Net;
 using System.Net.Http.Json;
 using AeroCompliance.Contracts.Dtos.Auth;
 using AeroCompliance.Domain.Enums;
+using AeroCompliance.Infrastructure.Persistence;
 using AeroCompliance.IntegrationTests.Infrastructure;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 
 namespace AeroCompliance.IntegrationTests.Authentication;
 
@@ -126,6 +129,8 @@ public class AuthenticationEndpointTests(ApiTestFixture fixture)
         Assert.NotNull(rotated);
         Assert.NotEqual(original.RefreshToken, rotated.RefreshToken);
         Assert.NotNull(oldStoredToken?.RevokedAt);
+        Assert.NotNull(oldStoredToken?.RotatedAt);
+        Assert.Equal(oldStoredToken?.FamilyId, (await fixture.FindRefreshTokenAsync(rotated.RefreshToken))?.FamilyId);
     }
 
     [Fact]
@@ -144,6 +149,94 @@ public class AuthenticationEndpointTests(ApiTestFixture fixture)
 
         Assert.Single(responses, response => response.StatusCode == HttpStatusCode.OK);
         Assert.Single(responses, response => response.StatusCode == HttpStatusCode.Unauthorized);
+        var winner = await Assert.Single(responses, response => response.StatusCode == HttpStatusCode.OK)
+            .Content.ReadFromJsonAsync<TokenResponse>();
+        var next = await firstClient.PostAsJsonAsync("/api/auth/refresh", new RefreshTokenRequest(winner!.RefreshToken));
+        Assert.Equal(HttpStatusCode.OK, next.StatusCode);
+        Assert.Null((await fixture.FindRefreshTokenAsync(original.RefreshToken))?.ReuseDetectedAt);
+    }
+
+    [Fact]
+    public async Task Reusing_rotated_token_after_grace_revokes_only_its_family()
+    {
+        var user = await fixture.CreateUserAsync(RoleName.Reviewer);
+        using var client = fixture.CreateClient();
+        var firstLogin = await client.LoginAsync(user);
+        var otherLogin = await client.LoginAsync(user);
+        var firstRotation = await RotateAsync(client, firstLogin.RefreshToken);
+        var current = await RotateAsync(client, firstRotation.RefreshToken);
+        var original = (await fixture.FindRefreshTokenAsync(firstLogin.RefreshToken))!;
+        using (var scope = fixture.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AeroComplianceDbContext>();
+            await db.RefreshTokens.Where(rt => rt.Id == original.Id).ExecuteUpdateAsync(update =>
+                update.SetProperty(rt => rt.RotatedAt, DateTimeOffset.UtcNow.AddMinutes(-1)));
+        }
+
+        var replay = await client.PostAsJsonAsync("/api/auth/refresh", new RefreshTokenRequest(firstLogin.RefreshToken));
+        var descendant = await client.PostAsJsonAsync("/api/auth/refresh", new RefreshTokenRequest(current.RefreshToken));
+        var unrelated = await client.PostAsJsonAsync("/api/auth/refresh", new RefreshTokenRequest(otherLogin.RefreshToken));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, replay.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, descendant.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, unrelated.StatusCode);
+        Assert.NotNull((await fixture.FindRefreshTokenAsync(firstLogin.RefreshToken))?.ReuseDetectedAt);
+        Assert.NotNull((await fixture.FindRefreshTokenAsync(current.RefreshToken))?.RevokedAt);
+    }
+
+    [Fact]
+    public async Task Logout_with_rotated_ancestor_revokes_its_descendants_but_not_other_login()
+    {
+        var user = await fixture.CreateUserAsync(RoleName.Inspector);
+        using var client = fixture.CreateClient();
+        var firstLogin = await client.LoginAsync(user);
+        var otherLogin = await client.LoginAsync(user);
+        var descendant = await RotateAsync(client, firstLogin.RefreshToken);
+
+        var logout = await client.PostAsJsonAsync("/api/auth/logout", new LogoutRequest(firstLogin.RefreshToken));
+        var sameFamily = await client.PostAsJsonAsync("/api/auth/refresh", new RefreshTokenRequest(descendant.RefreshToken));
+        var otherFamily = await client.PostAsJsonAsync("/api/auth/refresh", new RefreshTokenRequest(otherLogin.RefreshToken));
+
+        Assert.Equal(HttpStatusCode.NoContent, logout.StatusCode);
+        Assert.Equal(HttpStatusCode.Unauthorized, sameFamily.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, otherFamily.StatusCode);
+        Assert.Null((await fixture.FindRefreshTokenAsync(firstLogin.RefreshToken))?.ReuseDetectedAt);
+    }
+
+    [Fact]
+    public async Task Replay_racing_descendant_rotation_leaves_no_live_token_in_that_family()
+    {
+        var user = await fixture.CreateUserAsync(RoleName.Reviewer);
+        using var loginClient = fixture.CreateClient();
+        var original = await loginClient.LoginAsync(user);
+        var child = await RotateAsync(loginClient, original.RefreshToken);
+        var parent = (await fixture.FindRefreshTokenAsync(original.RefreshToken))!;
+        using (var scope = fixture.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AeroComplianceDbContext>();
+            await db.RefreshTokens.Where(rt => rt.Id == parent.Id).ExecuteUpdateAsync(update =>
+                update.SetProperty(rt => rt.RotatedAt, DateTimeOffset.UtcNow.AddMinutes(-1)));
+        }
+        using var replayClient = fixture.CreateClient();
+        using var rotateClient = fixture.CreateClient();
+
+        var responses = await Task.WhenAll(
+            replayClient.PostAsJsonAsync("/api/auth/refresh", new RefreshTokenRequest(original.RefreshToken)),
+            rotateClient.PostAsJsonAsync("/api/auth/refresh", new RefreshTokenRequest(child.RefreshToken)));
+
+        Assert.Equal(HttpStatusCode.Unauthorized, responses[0].StatusCode);
+        Assert.Contains(responses[1].StatusCode, new[] { HttpStatusCode.OK, HttpStatusCode.Unauthorized });
+        using var verificationScope = fixture.Services.CreateScope();
+        var verificationDb = verificationScope.ServiceProvider.GetRequiredService<AeroComplianceDbContext>();
+        Assert.False(await verificationDb.RefreshTokens.AnyAsync(rt =>
+            rt.FamilyId == parent.FamilyId && rt.RevokedAt == null));
+    }
+
+    private static async Task<TokenResponse> RotateAsync(HttpClient client, string token)
+    {
+        var response = await client.PostAsJsonAsync("/api/auth/refresh", new RefreshTokenRequest(token));
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        return (await response.Content.ReadFromJsonAsync<TokenResponse>())!;
     }
 
     [Fact]

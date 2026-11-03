@@ -174,6 +174,7 @@ public sealed class ApiTestFixture : IAsyncLifetime
         {
             Id = Guid.NewGuid(),
             UserId = user.Id,
+            FamilyId = Guid.NewGuid(),
             TokenHash = tokenService.HashRefreshToken(plaintextToken),
             ExpiresAt = expiresAt,
             RevokedAt = revoked ? DateTimeOffset.UtcNow : null,

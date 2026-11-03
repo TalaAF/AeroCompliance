@@ -7,6 +7,7 @@ import {
 } from "react";
 import {
   api,
+  ApiError,
   clearTokens,
   getAccessToken,
   getRefreshToken,
@@ -31,8 +32,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       if (getAccessToken())
         setUser((await api.get<CurrentUser>("/users/me")).data);
-    } catch {
-      clearTokens();
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) clearTokens();
     } finally {
       setLoading(false);
     }
@@ -56,7 +57,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUser(me);
       return me;
     } catch (e) {
-      clearTokens();
+      if (e instanceof ApiError && e.status === 401) clearTokens();
       throw e;
     }
   };
